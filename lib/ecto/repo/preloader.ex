@@ -242,10 +242,17 @@ defmodule Ecto.Repo.Preloader do
     key = Map.fetch!(struct, owner_key)
 
     loaded =
-      case ids do
-        %{^key => value} -> value
-        _ when cardinality == :many -> []
-        _ -> nil
+      if is_list(key) do
+        ids
+        |> Map.take(key)
+        |> Map.values
+        |> List.flatten
+      else
+        case ids do
+          %{^key => value} -> value
+          _ when cardinality == :many -> []
+          _ -> nil
+        end
       end
 
     Map.put(struct, field, loaded)

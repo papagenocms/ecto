@@ -1131,6 +1131,10 @@ defmodule Ecto.Association.ArrayBelongsTo do
              :on_cast, defaults: [], cardinality: :many, relationship: :child,
              unique: true]
 
+  def after_compile_validation(_, _) do
+    :ok
+  end
+
   @doc false
   def struct(module, name, opts) do
     ref       = if ref = opts[:references], do: ref, else: :id
@@ -1178,7 +1182,7 @@ defmodule Ecto.Association.ArrayBelongsTo do
   @doc false
   def assoc_query(%{queryable: queryable, related_key: related_key}, query, values) do
     Enum.reduce(values, (query || queryable), fn value, query ->
-      from x in query, or_where: ^value in field(x, ^related_key)
+      from x in query, or_where: field(x, ^related_key) in ^value
     end)
   end
 
@@ -1227,6 +1231,10 @@ defmodule Ecto.Association.ArrayHas do
   defstruct [:cardinality, :field, :owner, :owner_key, :related, :related_key,
              :on_cast, :queryable, :on_delete, :on_replace, unique: true,
              defaults: [], relationship: :child]
+
+  def after_compile_validation(_, _) do
+    :ok
+  end
 
   @doc false
   def struct(module, name, opts) do
@@ -1300,6 +1308,10 @@ defmodule Ecto.Association.ArrayHas do
 
   @doc false
   def assoc_query(%{queryable: queryable, related_key: related_key}, query, values) do
+    values = List.flatten(values)
+
+    from x in (query || queryable),
+      where: field(x, ^related_key) in ^values
   end
 
   def preload_info(%{related_key: related_key} = refl) do
