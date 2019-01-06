@@ -27,7 +27,7 @@ defmodule Ecto.Multi do
   ## Run
 
   Multi allows you to run arbitrary functions as part of your transaction
-  via the `run/3` and `run/5`. This is very useful when an operation depends
+  via `run/3` and `run/5`. This is very useful when an operation depends
   on the value of a previous operation. For this reason, the function given
   as callback to `run/3` and `run/5` will receive all changes performed by
   the multi so far as a map in the first argument.
@@ -101,7 +101,7 @@ defmodule Ecto.Multi do
 
   @type run :: (t -> {:ok | :error, any}) | {module, atom, [any]}
   @type merge :: (map -> t) | {module, atom, [any]}
-  @typep schema_or_source :: binary | {binary | nil, binary} | Ecto.Schema.t
+  @typep schema_or_source :: binary | {binary | nil, binary} | atom
   @typep operation :: {:changeset, Changeset.t, Keyword.t} |
                       {:run, run} |
                       {:merge, merge} |
@@ -194,7 +194,7 @@ defmodule Ecto.Multi do
 
   Duplicated operations are not allowed.
   """
-  @spec merge(t, (t -> {:ok | :error, any})) :: t
+  @spec merge(t, (map -> t)) :: t
   def merge(%Multi{} = multi, merge) when is_function(merge, 1) do
     Map.update!(multi, :operations, &[{:merge, {:merge, merge}} | &1])
   end
@@ -257,7 +257,7 @@ defmodule Ecto.Multi do
   @doc """
   Adds a delete operation to the multi.
 
-  Accepts the same arguments and options as `Ecto.Repo.delete/3` does.
+  Accepts the same arguments and options as `c:Ecto.Repo.delete/2` does.
   """
   @spec delete(t, name, Changeset.t | Ecto.Schema.t, Keyword.t) :: t
   def delete(multi, name, changeset_or_struct, opts \\ [])
@@ -330,8 +330,7 @@ defmodule Ecto.Multi do
   Accepts the same arguments and options as `c:Ecto.Repo.insert_all/3` does.
   """
   @spec insert_all(t, name, schema_or_source, [entry], Keyword.t) :: t
-        when schema_or_source: binary | {binary | nil, binary} | Ecto.Schema.t,
-             entry: map | Keyword.t
+        when entry: map | Keyword.t
   def insert_all(multi, name, schema_or_source, entries, opts \\ []) when is_list(opts) do
     add_operation(multi, name, {:insert_all, schema_or_source, entries, opts})
   end

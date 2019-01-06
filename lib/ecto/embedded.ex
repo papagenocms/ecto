@@ -48,20 +48,18 @@ defmodule Ecto.Embedded do
   loaded into the schema struct afterwards.
   """
   def prepare(changeset, adapter, repo_action) do
-    %{changes: changes, data: %{__struct__: schema}} = changeset
-    prepare(changeset, Map.take(changes, schema.__schema__(:embeds)), adapter, repo_action)
+    %{changes: changes, data: %{__struct__: schema}, types: types} = changeset
+    prepare(Map.take(changes, schema.__schema__(:embeds)), types, adapter, repo_action)
   end
 
-  defp prepare(changeset, embeds, _adapter, _repo_action) when embeds == %{} do
-    changeset
+  defp prepare(embeds, _types, _adapter, _repo_action) when embeds == %{} do
+    embeds
   end
 
-  defp prepare(%{types: types} = changeset, embeds, adapter, repo_action) do
-    update_in changeset.changes, fn changes ->
-      Enum.reduce embeds, changes, fn {name, changeset}, acc ->
-        {:embed, embed} = Map.get(types, name)
-        Map.put(acc, name, prepare_each(embed, changeset, adapter, repo_action))
-      end
+  defp prepare(embeds, types, adapter, repo_action) do
+    Enum.reduce embeds, embeds, fn {name, changeset}, acc ->
+      {:embed, embed} = Map.get(types, name)
+      Map.put(acc, name, prepare_each(embed, changeset, adapter, repo_action))
     end
   end
 
@@ -103,9 +101,11 @@ defmodule Ecto.Embedded do
   end
 
   defp to_struct(%Changeset{} = changeset, action, %{related: schema}, adapter) do
-    %{data: struct, changes: changes} = prepare(changeset, adapter, action)
+    %{data: struct, changes: changes} = changeset
+    embeds = prepare(changeset, adapter, action)
 
     changes
+    |> Map.merge(embeds)
     |> autogenerate_id(struct, action, schema, adapter)
     |> autogenerate(action, schema)
     |> apply_embeds(struct)
@@ -125,7 +125,7 @@ defmodule Ecto.Embedded do
 
   defp autogenerate_id(changes, _struct, :insert, schema, adapter) do
     case schema.__schema__(:autogenerate_id) do
-      {key, :binary_id} ->
+      {key, _source, :binary_id} ->
         Map.put_new_lazy(changes, key, fn -> adapter.autogenerate(:embed_id) end)
       {_key, :id} ->
         raise ArgumentError, "embedded schema `#{inspect schema}` cannot autogenerate `:id` primary keys, " <>

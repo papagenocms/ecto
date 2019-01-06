@@ -16,63 +16,71 @@ defmodule Ecto.Repo.Preloader do
   def query(rows, repo, preloads, take, fun, opts) do
     rows
     |> extract
-    |> do_preload(repo, preloads, take, opts)
+    |> normalize_and_preload_each(repo, preloads, take, opts)
     |> unextract(rows, fun)
   end
 
   defp extract([[nil|_]|t2]), do: extract(t2)
-  defp extract([[h|_]|t2]),   do: [h|extract(t2)]
-  defp extract([]),           do: []
+  defp extract([[h|_]|t2]), do: [h|extract(t2)]
+  defp extract([]), do: []
 
-  defp unextract(structs, [[nil|_] = h2|t2], fun),  do: [fun.(h2)|unextract(structs, t2, fun)]
+  defp unextract(structs, [[nil|_] = h2|t2], fun), do: [fun.(h2)|unextract(structs, t2, fun)]
   defp unextract([h1|structs], [[_|t1]|t2], fun), do: [fun.([h1|t1])|unextract(structs, t2, fun)]
-  defp unextract([], [], _fun),                   do: []
+  defp unextract([], [], _fun), do: []
 
   @doc """
   Implementation for `Ecto.Repo.preload/2`.
   """
   @spec preload(structs, atom, atom | list, Keyword.t) ::
-                structs when structs: [Ecto.Schema.t] | Ecto.Schema.t
+                structs when structs: [Ecto.Schema.t] | Ecto.Schema.t | nil
+  def preload(nil, _repo, _preloads, _opts) do
+    nil
+  end
+
   def preload(structs, repo, preloads, opts) when is_list(structs) do
-    do_preload(structs, repo, preloads, opts[:take], opts)
+    normalize_and_preload_each(structs, repo, preloads, opts[:take], opts)
   end
 
   def preload(struct, repo, preloads, opts) when is_map(struct) do
-    do_preload([struct], repo, preloads, opts[:take], opts) |> hd()
+    normalize_and_preload_each([struct], repo, preloads, opts[:take], opts) |> hd()
   end
 
-  defp do_preload(structs, repo, preloads, take, opts) do
+  defp normalize_and_preload_each(structs, repo, preloads, take, opts) do
     preloads = normalize(preloads, take, preloads)
     preload_each(structs, repo, preloads, opts)
   rescue
     e ->
       # Reraise errors so we ignore the preload inner stacktrace
-      reraise e
+      filter_and_reraise e, System.stacktrace
   end
 
   ## Preloading
 
   defp preload_each(structs, _repo, [], _opts),   do: structs
   defp preload_each([], _repo, _preloads, _opts), do: []
-  defp preload_each([sample|_] = structs, repo, preloads, opts) do
-    module = sample.__struct__
-    prefix = preload_prefix(opts, sample)
-    {assocs, throughs} = expand(module, preloads, {%{}, %{}})
+  defp preload_each(structs, repo, preloads, opts) do
+    if sample = Enum.find(structs, & &1) do
+      module = sample.__struct__
+      prefix = preload_prefix(opts, sample)
+      {assocs, throughs} = expand(module, preloads, {%{}, %{}})
 
-    assocs =
-      maybe_pmap Map.values(assocs), repo, opts, fn
-        {{:assoc, assoc, related_key}, take, query, sub_preloads}, opts ->
-          preload_assoc(structs, module, repo, prefix, assoc, related_key,
-                        query, sub_preloads, take, opts)
+      assocs =
+        maybe_pmap Map.values(assocs), repo, opts, fn
+          {{:assoc, assoc, related_key}, take, query, sub_preloads}, opts ->
+            preload_assoc(structs, module, repo, prefix, assoc, related_key,
+                          query, sub_preloads, take, opts)
+        end
+
+      throughs =
+        Map.values(throughs)
+
+      for struct <- structs do
+        struct = Enum.reduce assocs, struct, &load_assoc/2
+        struct = Enum.reduce throughs, struct, &load_through/2
+        struct
       end
-
-    throughs =
-      Map.values(throughs)
-
-    for struct <- structs do
-      struct = Enum.reduce assocs, struct, &load_assoc/2
-      struct = Enum.reduce throughs, struct, &load_through/2
-      struct
+    else
+      structs
     end
   end
 
@@ -90,7 +98,7 @@ defmodule Ecto.Repo.Preloader do
 
   defp maybe_pmap(assocs, repo, opts, fun) do
     if match?([_,_|_], assocs) and not repo.in_transaction? and
-       Keyword.get(opts, :in_parallel, true) do
+         Keyword.get(opts, :in_parallel, true) do
       # We pass caller: self() so pools like the ownership
       # pool knows where to fetch the connection from and
       # set the proper timeouts.
@@ -118,22 +126,25 @@ defmodule Ecto.Repo.Preloader do
     %{field: field, owner_key: owner_key, cardinality: card} = assoc
     force? = Keyword.get(opts, :force, false)
 
-    Enum.reduce structs, {[], [], []}, fn struct, {fetch_ids, loaded_ids, loaded_structs} ->
-      assert_struct!(module, struct)
-      %{^owner_key => id, ^field => value} = struct
+    Enum.reduce structs, {[], [], []}, fn
+      nil, acc ->
+        acc
+      struct, {fetch_ids, loaded_ids, loaded_structs} ->
+        assert_struct!(module, struct)
+        %{^owner_key => id, ^field => value} = struct
 
-      cond do
-        card == :one and not is_nil(value) and Ecto.assoc_loaded?(value) and not force? ->
-          {fetch_ids, [id|loaded_ids], [value|loaded_structs]}
-        card == :many and Ecto.assoc_loaded?(value) and not force? ->
-          {fetch_ids,
-           List.duplicate(id, length(value)) ++ loaded_ids,
-           value ++ loaded_structs}
-        is_nil(id) ->
-          {fetch_ids, loaded_ids, loaded_structs}
-        true ->
-          {[id|fetch_ids], loaded_ids, loaded_structs}
-      end
+        cond do
+          card == :one and Ecto.assoc_loaded?(value) and not force? ->
+            {fetch_ids, [id|loaded_ids], [value|loaded_structs]}
+          card == :many and Ecto.assoc_loaded?(value) and not force? ->
+            {fetch_ids,
+             List.duplicate(id, length(value)) ++ loaded_ids,
+             value ++ loaded_structs}
+          is_nil(id) ->
+            {fetch_ids, loaded_ids, loaded_structs}
+          true ->
+            {[id|fetch_ids], loaded_ids, loaded_structs}
+        end
     end
   end
 
@@ -142,8 +153,14 @@ defmodule Ecto.Repo.Preloader do
   end
 
   defp fetch_query(ids, _assoc, _repo, query, _prefix, {_, key}, _take, _opts) when is_function(query, 1) do
-    data = ids |> Enum.uniq |> query.() |> Enum.map(&{Map.fetch!(&1, key), &1}) |> Enum.sort
-    unzip_ids data, [], []
+    # Note we use an explicit sort because we don't want
+    # to reorder based on the struct. Only the ID.
+    ids
+    |> Enum.uniq
+    |> query.()
+    |> Enum.map(&{Map.fetch!(&1, key), &1})
+    |> Enum.sort(fn {id1, _}, {id2, _} -> id1 <= id2 end)
+    |> unzip_ids([], [])
   end
 
   defp fetch_query(ids, %{cardinality: card} = assoc, repo, query, prefix, related_key, take, opts) do
@@ -215,6 +232,10 @@ defmodule Ecto.Repo.Preloader do
     do: {ids, structs, acc}
 
   ## Load preloaded data
+
+  defp load_assoc({:assoc, _assoc, _ids}, nil) do
+    nil
+  end
 
   defp load_assoc({:assoc, assoc, ids}, struct) do
     %{field: field, owner_key: owner_key, cardinality: cardinality} = assoc
@@ -331,7 +352,7 @@ defmodule Ecto.Repo.Preloader do
 
   def expand(schema, preloads, acc) do
     Enum.reduce(preloads, acc, fn {preload, {fields, query, sub_preloads}}, {assocs, throughs} ->
-      assoc = Ecto.Association.association_from_schema!(schema, preload)
+      assoc = association_from_schema!(schema, preload)
       info  = assoc.__struct__.preload_info(assoc)
 
       case info do
@@ -359,7 +380,27 @@ defmodule Ecto.Repo.Preloader do
                          "with different queries: #{inspect left} and #{inspect right}"
   end
 
-  defp reraise(exception) do
-    reraise exception, Enum.reject(System.stacktrace, &match?({__MODULE__, _, _, _}, &1))
+  # Since there is some ambiguity between assoc and queries.
+  # We reimplement this function here for nice error messages.
+  defp association_from_schema!(schema, assoc) do
+    schema.__schema__(:association, assoc) ||
+      raise ArgumentError,
+            "schema #{inspect schema} does not have association #{inspect assoc}#{maybe_module(assoc)}"
+  end
+
+  defp maybe_module(assoc) do
+    case Atom.to_string(assoc) do
+      "Elixir." <> _ ->
+        " (if you were trying to pass a schema as a query to preload, " <>
+          "you have to explicitly convert it to a query by doing `from x in #{inspect assoc}` " <>
+          "or by calling Ecto.Queryable.to_query/1)"
+
+      _ ->
+        ""
+    end
+  end
+
+  defp filter_and_reraise(exception, stacktrace) do
+    reraise exception, Enum.reject(stacktrace, &match?({__MODULE__, _, _, _}, &1))
   end
 end

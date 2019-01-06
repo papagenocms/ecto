@@ -38,14 +38,10 @@ if Code.ensure_loaded?(Mariaex) do
         %{__struct__: _} = value ->
           value
         %{} = value ->
-          json_library().encode!(value)
+          Ecto.Adapter.json_library().encode!(value)
         value ->
           value
       end
-    end
-
-    defp json_library do
-      Application.fetch_env!(:ecto, :json_library)
     end
 
     def to_constraints(%Mariaex.Error{mariadb: %{code: 1062, message: message}}) do
@@ -89,7 +85,7 @@ if Code.ensure_loaded?(Mariaex) do
       offset   = offset(query, sources)
       lock     = lock(query.lock)
 
-      IO.iodata_to_binary([select, from, join, where, group_by, having, order_by, limit, offset | lock])
+      [select, from, join, where, group_by, having, order_by, limit, offset | lock]
     end
 
     def update_all(query, prefix \\ nil)
@@ -98,12 +94,17 @@ if Code.ensure_loaded?(Mariaex) do
       sources = create_names(query)
       {from, name} = get_source(query, sources, 0, from)
 
-      join   = join(query, sources)
-      prefix = prefix || ["UPDATE ", from, " AS ", name, join, " SET "]
-      fields = update_fields(query, sources)
-      where  = where(query, sources)
+      fields = if prefix do
+        update_fields(:on_conflict, query, sources)
+      else
+        update_fields(:update, query, sources)
+      end
 
-      IO.iodata_to_binary([prefix, fields | where])
+      {join, wheres} = using_join(query, :update_all, sources)
+      prefix = prefix || ["UPDATE ", from, " AS ", name, join, " SET "]
+      where  = where(%{query | wheres: wheres ++ query.wheres}, sources)
+
+      [prefix, fields | where]
     end
     def update_all(_query, _prefix) do
       error!(nil, "RETURNING is not supported in update_all by MySQL")
@@ -117,16 +118,15 @@ if Code.ensure_loaded?(Mariaex) do
       join   = join(query, sources)
       where  = where(query, sources)
 
-      IO.iodata_to_binary(["DELETE ", name, ".*", from, join | where])
+      ["DELETE ", name, ".*", from, join | where]
     end
     def delete_all(_query),
       do: error!(nil, "RETURNING is not supported in delete_all by MySQL")
 
     def insert(prefix, table, header, rows, on_conflict, []) do
       fields = intersperse_map(header, ?,, &quote_name/1)
-      IO.iodata_to_binary(["INSERT INTO ", quote_table(prefix, table), " (",
-                           fields, ") VALUES ", insert_all(rows) |
-                           on_conflict(on_conflict, header)])
+      ["INSERT INTO ", quote_table(prefix, table), " (", fields, ") VALUES ",
+       insert_all(rows) | on_conflict(on_conflict, header)]
     end
     def insert(_prefix, _table, _header, _rows, _on_conflict, _returning) do
       error!(nil, "RETURNING is not supported in insert/insert_all by MySQL")
@@ -149,8 +149,11 @@ if Code.ensure_loaded?(Mariaex) do
          [quoted, " = VALUES(", quoted, ?)]
        end)]
     end
-    defp on_conflict({query, _, []}, _header) do
+    defp on_conflict({%{wheres: []} = query, _, []}, _header) do
       [" ON DUPLICATE KEY " | update_all(query, "UPDATE ")]
+    end
+    defp on_conflict({_query, _, []}, _header) do
+      error!(nil, "Using a query with :where in combination with the :on_conflict option is not supported by MySQL")
     end
 
     defp insert_all(rows) do
@@ -165,14 +168,12 @@ if Code.ensure_loaded?(Mariaex) do
     def update(prefix, table, fields, filters, _returning) do
       fields = intersperse_map(fields, ", ", &[quote_name(&1), " = ?"])
       filters = intersperse_map(filters, " AND ", &[quote_name(&1), " = ?"])
-
-      IO.iodata_to_binary(["UPDATE ", quote_table(prefix, table), " SET ", fields, " WHERE " | filters])
+      ["UPDATE ", quote_table(prefix, table), " SET ", fields, " WHERE " | filters]
     end
 
     def delete(prefix, table, filters, _returning) do
       filters = intersperse_map(filters, " AND ", &[quote_name(&1), " = ?"])
-
-      IO.iodata_to_binary(["DELETE FROM ", quote_table(prefix, table), " WHERE " | filters])
+      ["DELETE FROM ", quote_table(prefix, table), " WHERE " | filters]
     end
 
     ## Query generation
@@ -217,24 +218,52 @@ if Code.ensure_loaded?(Mariaex) do
       [" FROM ", from, " AS " | name]
     end
 
-    defp update_fields(%Query{updates: updates} = query, sources) do
-      for(%{expr: expr} <- updates,
-          {op, kw} <- expr,
-          {key, value} <- kw,
-          do: update_op(op, key, value, sources, query)) |> Enum.intersperse(", ")
+    defp update_fields(type, %Query{updates: updates} = query, sources) do
+     fields = for(%{expr: expr} <- updates,
+                   {op, kw} <- expr,
+                   {key, value} <- kw,
+                   do: update_op(op, update_key(type, key, query, sources), value, sources, query))
+      Enum.intersperse(fields, ", ")
     end
 
-    defp update_op(:set, key, value, sources, query) do
-      [quote_name(key), " = " | expr(value, sources, query)]
+    defp update_key(:update, key, %Query{from: from} = query, sources) do
+      {_from, name} = get_source(query, sources, 0, from)
+
+      [name, ?. | quote_name(key)]
+    end
+    defp update_key(:on_conflict, key, _query, _sources) do
+      quote_name(key)
     end
 
-    defp update_op(:inc, key, value, sources, query) do
-      quoted = quote_name(key)
-      [quoted, " = ", quoted, " + " | expr(value, sources, query)]
+    defp update_op(:set, quoted_key, value, sources, query) do
+      [quoted_key, " = " | expr(value, sources, query)]
     end
 
-    defp update_op(command, _key, _value, _sources, query) do
+    defp update_op(:inc, quoted_key, value, sources, query) do
+      [quoted_key, " = ", quoted_key, " + " | expr(value, sources, query)]
+    end
+
+    defp update_op(command, _quoted_key, _value, _sources, query) do
       error!(query, "Unknown update operation #{inspect command} for MySQL")
+    end
+
+    defp using_join(%Query{joins: []}, _kind, _sources), do: {[], []}
+    defp using_join(%Query{joins: joins} = query, kind, sources) do
+      froms =
+        intersperse_map(joins, ", ", fn
+          %JoinExpr{qual: :inner, ix: ix, source: source} ->
+            {join, name} = get_source(query, sources, ix, source)
+            [join, " AS " | name]
+          %JoinExpr{qual: qual} ->
+            error!(query, "MySQL adapter supports only inner joins on #{kind}, got: `#{qual}`")
+        end)
+
+      wheres =
+        for %JoinExpr{on: %QueryExpr{expr: value} = expr} <- joins,
+            value != true,
+            do: expr |> Map.put(:__struct__, BooleanExpr) |> Map.put(:op, :and)
+
+      {[?,, ?\s | froms], wheres}
     end
 
     defp join(%Query{joins: []}, _sources), do: []
@@ -242,9 +271,12 @@ if Code.ensure_loaded?(Mariaex) do
       Enum.map(joins, fn
         %JoinExpr{on: %QueryExpr{expr: expr}, qual: qual, ix: ix, source: source} ->
           {join, name} = get_source(query, sources, ix, source)
-          [join_qual(qual, query), join, " AS ", name, " ON " | expr(expr, sources, query)]
+          [join_qual(qual, query), join, " AS ", name | join_on(qual, expr, sources, query)]
       end)
     end
+
+    defp join_on(:cross, true, _sources, _query), do: []
+    defp join_on(_qual, expr, sources, query), do: [" ON " | expr(expr, sources, query)]
 
     defp join_qual(:inner, _), do: " INNER JOIN "
     defp join_qual(:left, _),  do: " LEFT OUTER JOIN "
@@ -328,13 +360,10 @@ if Code.ensure_loaded?(Mariaex) do
       [name, ?. | quote_name(field)]
     end
 
-    defp expr({:&, _, [idx, fields, _counter]}, sources, query) do
-      {source, name, schema} = elem(sources, idx)
-      if is_nil(schema) and is_nil(fields) do
-        error!(query, "MySQL does not support selecting all fields from #{source} without a schema. " <>
-                      "Please specify a schema or specify exactly which fields you want to select")
-      end
-      intersperse_map(fields, ", ", &[name, ?. | quote_name(&1)])
+    defp expr({:&, _, [idx]}, sources, query) do
+      {source, _name, _schema} = elem(sources, idx)
+      error!(query, "MySQL does not support selecting all fields from #{source} without a schema. " <>
+                    "Please specify a schema or specify exactly which fields you want to select")
     end
 
     defp expr({:in, _, [_left, []]}, _sources, _query) do
@@ -367,8 +396,8 @@ if Code.ensure_loaded?(Mariaex) do
       ["NOT (", expr(expr, sources, query), ?)]
     end
 
-    defp expr(%Ecto.SubQuery{query: query, fields: fields}, _sources, _query) do
-      query.select.fields |> put_in(fields) |> all()
+    defp expr(%Ecto.SubQuery{query: query}, _sources, _query) do
+      all(query)
     end
 
     defp expr({:fragment, _, [kw]}, _sources, query) when is_list(kw) or tuple_size(kw) == 3 do
@@ -427,8 +456,8 @@ if Code.ensure_loaded?(Mariaex) do
     end
 
     defp expr(%Ecto.Query.Tagged{value: other, type: type}, sources, query)
-        when type in [:id, :integer, :float] do
-      expr(other, sources, query)
+         when type in [:decimal, :float] do
+      [expr(other, sources, query), " + 0"]
     end
 
     defp expr(%Ecto.Query.Tagged{value: other, type: type}, sources, query) do
@@ -476,7 +505,7 @@ if Code.ensure_loaded?(Mariaex) do
       current =
         case elem(sources, pos) do
           {table, schema} ->
-            name = [String.first(table) | Integer.to_string(pos)]
+            name = [create_alias(table) | Integer.to_string(pos)]
             {quote_table(prefix, table), name, schema}
           {:fragment, _, _} ->
             {nil, [?f | Integer.to_string(pos)], nil}
@@ -488,6 +517,13 @@ if Code.ensure_loaded?(Mariaex) do
 
     defp create_names(_prefix, _sources, pos, pos) do
       []
+    end
+
+    defp create_alias(<<first, _rest::binary>>) when first in ?a..?z when first in ?A..?Z do
+      <<first>>
+    end
+    defp create_alias(_) do
+      "t"
     end
 
     ## DDL
@@ -632,6 +668,10 @@ if Code.ensure_loaded?(Mariaex) do
       do: [" DEFAULT '", escape_string(literal), ?']
     defp default_expr({:ok, literal}) when is_number(literal) or is_boolean(literal),
       do: [" DEFAULT ", to_string(literal)]
+    defp default_expr({:ok, %{} = map}) do
+      default = Ecto.Adapter.json_library().encode!(map)
+      [" DEFAULT ", [?', escape_string(default), ?']]
+    end
     defp default_expr({:ok, {:fragment, expr}}),
       do: [" DEFAULT ", expr]
     defp default_expr(:error),
@@ -690,10 +730,12 @@ if Code.ensure_loaded?(Mariaex) do
 
     defp reference_on_delete(:nilify_all), do: " ON DELETE SET NULL"
     defp reference_on_delete(:delete_all), do: " ON DELETE CASCADE"
+    defp reference_on_delete(:restrict), do: " ON DELETE RESTRICT"
     defp reference_on_delete(_), do: []
 
     defp reference_on_update(:nilify_all), do: " ON UPDATE SET NULL"
     defp reference_on_update(:update_all), do: " ON UPDATE CASCADE"
+    defp reference_on_update(:restrict), do: " ON UPDATE RESTRICT"
     defp reference_on_update(_), do: []
 
     ## Helpers
@@ -744,6 +786,8 @@ if Code.ensure_loaded?(Mariaex) do
       |> :binary.replace("\\", "\\\\", [:global])
     end
 
+    defp ecto_cast_to_db(:id, _query), do: "unsigned"
+    defp ecto_cast_to_db(:integer, _query), do: "unsigned"
     defp ecto_cast_to_db(:string, _query), do: "char"
     defp ecto_cast_to_db(type, query), do: ecto_to_db(type, query)
 

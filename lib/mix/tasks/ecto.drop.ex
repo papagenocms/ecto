@@ -3,13 +3,18 @@ defmodule Mix.Tasks.Ecto.Drop do
   import Mix.Ecto
 
   @shortdoc "Drops the repository storage"
-  @recursive true
+  @default_opts [force: false]
 
   @moduledoc """
   Drop the storage for the given repository.
 
-  The repository must be set under `:ecto_repos` in the
-  current app configuration or given via the `-r` option.
+  The repositories to create are the ones specified under the
+  `:ecto_repos` option in the current app configuration. However,
+  if the `-r` option is given, it replaces the `:ecto_repos` config.
+
+  Since Ecto tasks can only be executed once, if you need to create
+  multiple repositories, set `:ecto_repos` accordingly or pass the `-r`
+  flag multiple times.
 
   ## Examples
 
@@ -20,20 +25,23 @@ defmodule Mix.Tasks.Ecto.Drop do
 
     * `-r`, `--repo` - the repo to drop
     * `--no-compile` - do not compile before stopping
+    * `--force` - do not ask for confirmation
 
   """
 
   @doc false
   def run(args) do
     repos = parse_repo(args)
-    {opts, _, _} = OptionParser.parse args, switches: [quiet: :boolean]
+    {opts, _, _} = OptionParser.parse args, switches: [quiet: :boolean, force: :boolean]
+    opts = Keyword.merge(@default_opts, opts)
 
     Enum.each repos, fn repo ->
       ensure_repo(repo, args)
       ensure_implements(repo.__adapter__, Ecto.Adapter.Storage,
-                                          "to drop storage for #{inspect repo}")
+                                          "drop storage for #{inspect repo}")
 
       if skip_safety_warnings?() or
+         opts[:force] or
          Mix.shell.yes?("Are you sure you want to drop the database for repo #{inspect repo}?") do
         drop_database(repo, opts)
       end

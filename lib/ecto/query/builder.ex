@@ -49,18 +49,18 @@ defmodule Ecto.Query.Builder do
 
   # tagged types
   def escape({:type, _, [{:^, _, [arg]}, type]}, _type, {params, acc}, vars, _env) do
-    {type, escaped} = validate_type!(type, vars)
-    index  = Map.size(params)
+    type = validate_type!(type, vars)
+    index = Map.size(params)
     params = Map.put(params, index, {arg, type})
 
-    expr = {:{}, [], [:type, [], [{:{}, [], [:^, [], [index]]}, escaped]]}
+    expr = {:{}, [], [:type, [], [{:{}, [], [:^, [], [index]]}, type]]}
     {expr, {params, acc}}
   end
 
   # fragments
   def escape({:fragment, _, [query]}, _type, params_acc, vars, env) when is_list(query) do
-    {escaped, params_acc} = Enum.map_reduce(query, params_acc, &escape_fragment(&1, :any, &2, vars, env))
-
+    {escaped, params_acc} =
+      Enum.map_reduce(query, params_acc, &escape_fragment(&1, :any, &2, vars, env))
     {{:{}, [], [:fragment, [], [escaped]]}, params_acc}
   end
 
@@ -217,6 +217,12 @@ defmodule Ecto.Query.Builder do
     {expr, params_acc}
   end
 
+  def escape({:=, _, _} = expr, _type, _params_acc, _vars, _env) do
+    error! "`#{Macro.to_string(expr)}` is not a valid query expression. " <>
+            "The match operator is not supported: `=`. " <>
+            "Did you mean to use `==` instead?"
+  end
+
   def escape({op, _, _}, _type, _params_acc, _vars, _env) when op in ~w(|| && !)a do
     error! "short-circuit operators are not supported: `#{op}`. " <>
            "Instead use boolean operators: `and`, `or`, and `not`"
@@ -236,10 +242,25 @@ defmodule Ecto.Query.Builder do
   # Vars are not allowed
   def escape({name, _, context} = var, _type, _params_acc, _vars, _env) when is_atom(name) and is_atom(context) do
     error! "variable `#{Macro.to_string(var)}` is not a valid query expression. " <>
-           "Variables need to be explicitly interpolated in queries with ^"
+           "IF you wanted to inject a variable, you have to explicitly interpolate it " <>
+           "with ^. If you wanted to refer to a field, use the source.field syntax"
   end
 
-  # Everything else is not allowed
+  # Raise nice error messages for fun calls.
+  def escape({fun, _, args} = other, _type, _params_acc, _vars, _env) when is_atom(fun) and is_list(args) do
+    error! """
+    `#{Macro.to_string(other)}` is not a valid query expression. \
+    If you are trying to invoke a function that is not supported by Ecto, \
+    you can use fragments:
+
+        fragment("some_function(?, ?, ?)", m.some_field, 1)
+
+    See Ecto.Query.API to learn more about the supported functions and \
+    Ecto.Query.API.fragment/1 to learn more about fragments.
+    """
+  end
+
+  # For everything else we raise
   def escape(other, _type, _params_acc, _vars, _env) do
     error! "`#{Macro.to_string(other)}` is not a valid query expression"
   end
@@ -359,25 +380,26 @@ defmodule Ecto.Query.Builder do
     end
   end
 
-  defp validate_type!({composite, type}, vars) do
-    {type, escaped} = validate_type!(type, vars)
-    {{composite, type}, {composite, escaped}}
+  @doc """
+  Validates the type with the given vars.
+  """
+  def validate_type!({composite, type}, vars) do
+    {composite, validate_type!(type, vars)}
   end
-
-  defp validate_type!({:^, _, [type]}, _vars),
-    do: {type, type}
-  defp validate_type!({:__aliases__, _, _} = type, _vars),
-    do: {type, type}
-  defp validate_type!(type, _vars) when is_atom(type),
-    do: {type, type}
-  defp validate_type!({{:., _, [{var, _, context}, field]}, _, []}, vars)
+  def validate_type!({:^, _, [type]}, _vars),
+    do: type
+  def validate_type!({:__aliases__, _, _} = type, _vars),
+    do: type
+  def validate_type!(type, _vars) when is_atom(type),
+    do: type
+  def validate_type!({{:., _, [{var, _, context}, field]}, _, []}, vars)
     when is_atom(var) and is_atom(context) and is_atom(field),
-    do: {{find_var!(var, vars), field}, escape_field(var, field, vars)}
-  defp validate_type!({:field, _, [{var, _, context}, field]}, vars)
+    do: {find_var!(var, vars), field}
+  def validate_type!({:field, _, [{var, _, context}, field]}, vars)
     when is_atom(var) and is_atom(context) and is_atom(field),
-    do: {{find_var!(var, vars), field}, escape_field(var, field, vars)}
+    do: {find_var!(var, vars), field}
 
-  defp validate_type!(type, _vars) do
+  def validate_type!(type, _vars) do
     error! "type/2 expects an alias, atom or source.field as second argument, got: `#{Macro.to_string(type)}`"
   end
 
@@ -479,8 +501,8 @@ defmodule Ecto.Query.Builder do
     try_expansion(expr, type, params, vars, {env, &escape/5})
   end
 
-  defp try_expansion(expr, type, params, vars, {env, fun} = env_fun) do
-    case Macro.expand(expr, env) do
+  defp try_expansion(expr, type, params, vars, {env, fun}) do
+    case Macro.expand_once(expr, env) do
       ^expr ->
         error! """
         `#{Macro.to_string(expr)}` is not a valid query expression.
@@ -492,7 +514,7 @@ defmodule Ecto.Query.Builder do
           you need to explicitly interpolate it with ^
         """
       expanded ->
-        fun.(expanded, type, params, vars, env_fun)
+        fun.(expanded, type, params, vars, env)
     end
   end
 
@@ -567,6 +589,7 @@ defmodule Ecto.Query.Builder do
   Called by escaper at runtime to cast Ecto.DateTime to :naive_datetime.
   """
   def cast_datetime!(%Ecto.DateTime{year: year, month: month, day: day, hour: hour, min: min, sec: sec, usec: usec}) do
+    IO.warn "Ecto.DateTime is deprecated, please use :naive_datetime and NaiveDateTime instead"
     {:ok, value} = NaiveDateTime.new(year, month, day, hour, min, sec, {usec, 6})
     value
   end
@@ -577,6 +600,7 @@ defmodule Ecto.Query.Builder do
   Called by escaper at runtime to cast Ecto.Date to :date.
   """
   def cast_date!(%Ecto.Date{year: year, month: month, day: day}) do
+    IO.warn "Ecto.Date is deprecated, please use :date and Date instead"
     {:ok, value} = Date.new(year, month, day)
     value
   end
@@ -735,7 +759,6 @@ defmodule Ecto.Query.Builder do
   """
   def apply_query(query, module, args, env) do
     query = Macro.expand(query, env)
-    args  = for i <- args, do: escape_query(i)
     case unescape_query(query) do
       %Query{} = unescaped ->
         apply(module, :apply, [unescaped|args]) |> escape_query

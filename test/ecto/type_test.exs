@@ -22,7 +22,7 @@ defmodule Ecto.TypeTest do
 
     @primary_key {:id, :binary_id, autogenerate: true}
     schema "" do
-      field :a, :integer
+      field :a, :integer, source: :abc
       field :b, :integer, virtual: true
       field :c, :integer, default: 0
     end
@@ -95,6 +95,11 @@ defmodule Ecto.TypeTest do
     assert cast({:array, Custom}, 1) == :error
   end
 
+  test "in" do
+    assert cast({:in, :integer}, ["1", "2", "3"]) == {:ok, [1, 2, 3]}
+    assert cast({:in, :integer}, nil) == :error
+  end
+
   test "decimal" do
     assert cast(:decimal, "1.0") == {:ok, Decimal.new("1.0")}
     assert cast(:decimal, 1.0) == {:ok, Decimal.new("1.0")}
@@ -115,11 +120,12 @@ defmodule Ecto.TypeTest do
                            owner: __MODULE__, related: Schema}
     type  = {:embed, embed}
 
-    assert {:ok, %Schema{a: 1, c: 0}} = adapter_load(Ecto.TestAdapter, type, %{"a" => 1})
+    assert {:ok, %Schema{id: @uuid_string, a: 1, c: 0}} =
+           adapter_load(Ecto.TestAdapter, type, %{"id" => @uuid_binary, "abc" => 1})
     assert {:ok, nil} == adapter_load(Ecto.TestAdapter,type, nil)
     assert :error == adapter_load(Ecto.TestAdapter, type, 1)
 
-    assert {:ok, %{a: 1, c: 0, id: @uuid_binary}} ==
+    assert {:ok, %{abc: 1, c: 0, id: @uuid_binary}} ==
            adapter_dump(Ecto.TestAdapter, type, %Schema{id: @uuid_string, a: 1})
 
     assert :error == cast(type, %{"a" => 1})
@@ -133,14 +139,15 @@ defmodule Ecto.TypeTest do
                            owner: __MODULE__, related: Schema}
     type  = {:embed, embed}
 
-    assert {:ok, [%Schema{a: 1, c: 0}]} = adapter_load(Ecto.TestAdapter, type, [%{"a" => 1}])
+    assert {:ok, [%Schema{id: @uuid_string, a: 1, c: 0}]} =
+           adapter_load(Ecto.TestAdapter, type, [%{"id" => @uuid_binary, "abc" => 1}])
     assert {:ok, []} == adapter_load(Ecto.TestAdapter, type, nil)
     assert :error == adapter_load(Ecto.TestAdapter, type, 1)
 
-    assert {:ok, [%{a: 1, id: @uuid_binary, c: 0}]} ==
+    assert {:ok, [%{id: @uuid_binary, abc: 1, c: 0}]} ==
            adapter_dump(Ecto.TestAdapter, type, [%Schema{id: @uuid_string, a: 1}])
 
-    assert cast(type, [%{"a" => 1}]) == :error
+    assert cast(type, [%{"abc" => 1}]) == :error
     assert cast(type, [%Schema{}]) == {:ok, [%Schema{}]}
     assert cast(type, []) == {:ok, []}
     assert match?({:array, :any}, type)
@@ -189,6 +196,9 @@ defmodule Ecto.TypeTest do
            {:ok, @date}
     assert Ecto.Type.cast(:date, ~T[12:23:34]) ==
            :error
+
+    assert Ecto.Type.cast(:date, "2015-12-31T00:00:00") == {:ok, @date}
+    assert Ecto.Type.cast(:date, "2015-12-31 00:00:00") == {:ok, @date}
   end
 
   @time ~T[23:50:07]
@@ -199,11 +209,14 @@ defmodule Ecto.TypeTest do
     assert Ecto.Type.cast(:time, @time) == {:ok, @time}
     assert Ecto.Type.cast(:time, @time_zero) ==  {:ok, @time_zero}
 
+    assert Ecto.Type.cast(:time, "23:50") == {:ok, @time_zero}
     assert Ecto.Type.cast(:time, "23:50:07") == {:ok, @time}
     assert Ecto.Type.cast(:time, "23:50:07Z") == {:ok, @time}
     assert Ecto.Type.cast(:time, "23:50:07.030000") == {:ok, @time_usec}
     assert Ecto.Type.cast(:time, "23:50:07.030000Z") == {:ok, @time_usec}
 
+    assert Ecto.Type.cast(:time, "24:01") == :error
+    assert Ecto.Type.cast(:time, "00:61") == :error
     assert Ecto.Type.cast(:time, "24:01:01") == :error
     assert Ecto.Type.cast(:time, "00:61:00") == :error
     assert Ecto.Type.cast(:time, "00:00:61") == :error
@@ -293,17 +306,17 @@ defmodule Ecto.TypeTest do
     assert Ecto.Type.cast(:naive_datetime, %{year: 2015, month: 1, day: 23, hour: 23, minute: nil}) ==
            :error
 
-    assert Ecto.Type.cast(:naive_datetime, DateTime.from_unix!(10, :seconds)) ==
+    assert Ecto.Type.cast(:naive_datetime, DateTime.from_unix!(10, :second)) ==
            {:ok, ~N[1970-01-01 00:00:10]}
 
-    assert Ecto.Type.cast(:naive_datetime, @time) ==
-           :error
+    assert Ecto.Type.cast(:naive_datetime, @time) == :error
+    assert Ecto.Type.cast(:naive_datetime, 1) == :error
   end
 
-  @datetime DateTime.from_unix!(1422057007, :seconds)
-  @datetime_zero DateTime.from_unix!(1422057000, :seconds)
-  @datetime_usec DateTime.from_unix!(1422057007008000, :microseconds)
-  @datetime_leapyear DateTime.from_unix!(951868207, :seconds)
+  @datetime DateTime.from_unix!(1422057007, :second)
+  @datetime_zero DateTime.from_unix!(1422057000, :second)
+  @datetime_usec DateTime.from_unix!(1422057007008000, :microsecond)
+  @datetime_leapyear DateTime.from_unix!(951868207, :second)
 
   test "casting utc datetime" do
     assert Ecto.Type.cast(:utc_datetime, @datetime) == {:ok, @datetime}
@@ -313,17 +326,25 @@ defmodule Ecto.TypeTest do
     assert Ecto.Type.cast(:utc_datetime, "2015-01-23 23:50:07") == {:ok, @datetime}
     assert Ecto.Type.cast(:utc_datetime, "2015-01-23T23:50:07") == {:ok, @datetime}
     assert Ecto.Type.cast(:utc_datetime, "2015-01-23T23:50:07Z") == {:ok, @datetime}
+    assert Ecto.Type.cast(:utc_datetime, "2015-01-24T09:50:07+10:00") == {:ok, @datetime}
     assert Ecto.Type.cast(:utc_datetime, "2000-02-29T23:50:07") == {:ok, @datetime_leapyear}
     assert Ecto.Type.cast(:utc_datetime, "2015-01-23P23:50:07") == :error
 
     assert Ecto.Type.cast(:utc_datetime, "2015-01-23T23:50:07.008000") == {:ok, @datetime_usec}
     assert Ecto.Type.cast(:utc_datetime, "2015-01-23T23:50:07.008000Z") == {:ok, @datetime_usec}
+    assert Ecto.Type.cast(:utc_datetime, "2015-01-23T17:50:07.008000-06:00") == {:ok, @datetime_usec}
 
     assert Ecto.Type.cast(:utc_datetime, %{"year" => "2015", "month" => "1", "day" => "23",
                                            "hour" => "23", "minute" => "50", "second" => "07"}) ==
            {:ok, @datetime}
 
     assert Ecto.Type.cast(:utc_datetime, %{year: 2015, month: 1, day: 23, hour: 23, minute: 50, second: 07}) ==
+           {:ok, @datetime}
+
+    assert Ecto.Type.cast(:utc_datetime, %DateTime{calendar: Calendar.ISO, year: 2015, month: 1, day: 24,
+                                                   hour: 9, minute: 50, second: 7, microsecond: {0, 0},
+                                                   std_offset: 0, utc_offset: 36000,
+                                                   time_zone: "Etc/GMT-10", zone_abbr: "+10"}) ==
            {:ok, @datetime}
 
     assert Ecto.Type.cast(:utc_datetime, %{"year" => "", "month" => "", "day" => "",
@@ -356,7 +377,7 @@ defmodule Ecto.TypeTest do
     assert Ecto.Type.cast(:utc_datetime, %{year: 2015, month: 1, day: 23, hour: 23, minute: nil}) ==
            :error
 
-    assert Ecto.Type.cast(:utc_datetime, ~T[12:23:34]) ==
-           :error
+    assert Ecto.Type.cast(:utc_datetime, ~T[12:23:34]) == :error
+    assert Ecto.Type.cast(:utc_datetime, 1) == :error
   end
 end

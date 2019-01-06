@@ -27,13 +27,12 @@ defmodule Ecto.Adapters.Postgres do
   recompilation in order to make an effect.
 
     * `:adapter` - The adapter name, in this case, `Ecto.Adapters.Postgres`
-    * `:name`- The name of the Repo supervisor process
-    * `:pool` - The connection pool module, defaults to `DBConnection.Poolboy`
-    * `:pool_timeout` - The default timeout to use on pool calls, defaults to `5000`
-    * `:timeout` - The default timeout to use on queries, defaults to `15000`
 
   ### Connection options
 
+    * `:pool` - The connection pool module, defaults to `DBConnection.Poolboy`
+    * `:pool_timeout` - The default timeout to use on pool calls, defaults to `5000`
+    * `:timeout` - The default timeout to use on queries, defaults to `15000`
     * `:hostname` - Server hostname
     * `:port` - Server port (default: 5432)
     * `:username` - Username
@@ -64,6 +63,17 @@ defmodule Ecto.Adapters.Postgres do
     * `:lc_collate` - the collation order
     * `:lc_ctype` - the character classification
     * `:dump_path` - where to place dumped structures
+
+  ### After connect callback
+
+  If you want to execute a callback as soon as connection is established
+  to the database, you can use the `:after_connect` configuration. For
+  example, in your repository configuration you can add:
+
+    after_connect: {Postgrex, :query!, ["SET search_path TO global_prefix", []]}
+
+  You can also specify your own module that will receive the Postgrex
+  connection as argument.
 
   ## Extensions
 
@@ -155,14 +165,13 @@ defmodule Ecto.Adapters.Postgres do
   @doc false
   def structure_dump(default, config) do
     table = config[:migration_source] || "schema_migrations"
-
     with {:ok, versions} <- select_versions(table, config),
          {:ok, path} <- pg_dump(default, config),
          do: append_versions(table, versions, path)
   end
 
   defp select_versions(table, config) do
-    case run_query(~s[SELECT version FROM "#{table}" ORDER BY version], config) do
+    case run_query(~s[SELECT version FROM public."#{table}" ORDER BY version], config) do
       {:ok, %{rows: rows}} -> {:ok, Enum.map(rows, &hd/1)}
       {:error, %{postgres: %{code: :undefined_table}}} -> {:ok, []}
       {:error, _} = error -> error
@@ -185,11 +194,11 @@ defmodule Ecto.Adapters.Postgres do
   defp append_versions(_table, [], path) do
     {:ok, path}
   end
+
   defp append_versions(table, versions, path) do
     sql =
-      ~s[INSERT INTO "#{table}" (version) VALUES ] <>
-      Enum.map_join(versions, ", ", &"(#{&1})") <>
-      ~s[;\n\n]
+      ~s[INSERT INTO public."#{table}" (version) VALUES ] <>
+        Enum.map_join(versions, ", ", &"(#{&1})") <> ~s[;\n\n]
 
     File.open!(path, [:append], fn file ->
       IO.write(file, sql)

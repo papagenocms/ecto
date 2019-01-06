@@ -82,12 +82,12 @@ defmodule Ecto.Migration do
 
   ## Prefixes
 
-  Migrations support specifying a table prefix or index prefix which will target either a schema
-  if using Postgres, or a different database if using MySQL. If no prefix is
-  provided, the default schema or database is used.
-  Any reference declared in the table migration refers by default to the table with
-  the same declared prefix.
-  The prefix is specified in the table options:
+  Migrations support specifying a table prefix or index prefix which will
+  target either a schema if using Postgres, or a different database if using
+  MySQL. If no prefix is provided, the default schema or database is used.
+
+  Any reference declared in the table migration refers by default to the table
+  with the same declared prefix. The prefix is specified in the table options:
 
       def up do
         create table("weather", prefix: "north_america") do
@@ -103,11 +103,11 @@ defmodule Ecto.Migration do
         create index("weather", [:city], prefix: "north_america")
       end
 
-  Note: if using MySQL with a prefixed table, you must use the same prefix for the references since
-  cross database references are not supported.
+  Note: if using MySQL with a prefixed table, you must use the same prefix
+  for the references since cross database references are not supported.
 
-  For both MySQL and Postgres with a prefixed table, you must use the same prefix for the index field to ensure
-  you index the prefix qualified table.
+  For both MySQL and Postgres with a prefixed table, you must use the same
+  prefix for the index field to ensure you index the prefix qualified table.
 
   ## Transactions
 
@@ -149,12 +149,25 @@ defmodule Ecto.Migration do
         end
       end
 
-  ## Schema Migrations table
+  ## Repo configuration
 
-  Version numbers of migrations will be saved in `schema_migrations` table.
-  But you can configure the table via:
+  The following migration configurations are available for under
+  a given repository.
 
-      config :app, App.Repo, migration_source: "my_migrations"
+    * `:migration_source` - Version numbers of migrations will be saved in
+      `schema_migrations` table but you can configure the table via:
+
+          config :app, App.Repo, migration_source: "my_migrations"
+
+    * `:migration_primary_key` - Ecto uses the `:id` column with type
+      `:bigserial` but you can configure it via:
+
+          config :app, App.Repo, migration_primary_key: [id: :uuid, type: :binary_id]
+
+    * `:migration_timestamps` - Ecto uses type `:naive_datetime` but you
+      can configure it via:
+
+          config :app, App.Repo, migration_timestamps: [type: :utc_datetime]
 
   """
 
@@ -221,6 +234,19 @@ defmodule Ecto.Migration do
                            check: String.t | nil, exclude: String.t | nil, comment: String.t | nil}
   end
 
+  defmodule Command do
+    @moduledoc """
+    Used internally by adapters.
+
+    This represents the up and down legs of a reversible raw command
+    that is usually define with `Ecto.Migration.execute/1`.
+
+    To define a reversible command in a migration, see `Ecto.Migration.execute/2`
+    """
+    defstruct up: nil, down: nil
+    @type t :: %__MODULE__{up: String.t, down: String.t}
+  end
+
   alias Ecto.Migration.Runner
 
   @doc false
@@ -276,7 +302,8 @@ defmodule Ecto.Migration do
       Runner.start_command({unquote(command), Ecto.Migration.__prefix__(table)})
 
       if table.primary_key do
-        add(:id, :bigserial, primary_key: true)
+        opts = Runner.repo_config(:migration_primary_key, [])
+        add(opts[:name] || :id, opts[:type] || :bigserial, primary_key: true)
       end
 
       unquote(block)
@@ -435,7 +462,7 @@ defmodule Ecto.Migration do
     table(Atom.to_string(name), opts)
   end
 
-  def table(name, opts) when is_binary(name) do
+  def table(name, opts) when is_binary(name) and is_list(opts) do
     struct(%Table{name: name}, opts)
   end
 
@@ -504,12 +531,18 @@ defmodule Ecto.Migration do
       # The index type can be specified
       create index("products", [:name], using: :hash)
 
-      # Create an index on custom expressions
-      create index("products", ["lower(name)"], name: :products_lower_name_index)
-
       # Create a partial index
       create index("products", [:user_id], where: "price = 0", name: :free_products_index)
 
+  Indexes also support custom expressions. Some databases may require the
+  index expression to be written between parens:
+
+      # Create an index on custom expressions
+      create index("products", ["(lower(name))"], name: :products_lower_name_index)
+
+      # To create a tsvector index with GIN on Postgres
+      create index("products", ["(to_tsvector('english', name))"],
+                   name: :products_name_vector, using: "GIN")
   """
   def index(table, columns, opts \\ [])
 
@@ -517,13 +550,13 @@ defmodule Ecto.Migration do
     index(Atom.to_string(table), columns, opts)
   end
 
-  def index(table, columns, opts) when is_binary(table) and is_list(columns) do
-    index = struct(%Index{table: table, columns: columns}, opts)
-    %{index | name: index.name || default_index_name(index)}
-  end
-
   def index(table, column, opts) when is_binary(table) and is_atom(column) do
     index(table, [column], opts)
+  end
+
+  def index(table, columns, opts) when is_binary(table) and is_list(columns) and is_list(opts) do
+    index = struct(%Index{table: table, columns: columns}, opts)
+    %{index | name: index.name || default_index_name(index)}
   end
 
   @doc """
@@ -533,7 +566,7 @@ defmodule Ecto.Migration do
   """
   def unique_index(table, columns, opts \\ [])
 
-  def unique_index(table, columns, opts) do
+  def unique_index(table, columns, opts) when is_list(opts) do
     index(table, columns, [unique: true] ++ opts)
   end
 
@@ -547,17 +580,36 @@ defmodule Ecto.Migration do
   end
 
   @doc """
-  Executes arbitrary SQL or a keyword command in NoSQL databases.
+  Executes arbitrary SQL or a keyword command.
+
+  Reversible commands can be defined by calling `execute/2`.
 
   ## Examples
 
-      execute "UPDATE posts SET published_at = NULL"
+      execute "CREATE EXTENSION postgres_fdw"
 
       execute create: "posts", capped: true, size: 1024
 
   """
   def execute(command) when is_binary(command) or is_list(command) do
     Runner.execute command
+  end
+
+  @doc """
+  Executes reversible SQL commands.
+
+  This is useful for database-specific functionality that does not
+  warrant special support in Ecto, for example, creating and dropping
+  a PostgreSQL extension, and avoids having to define up/down blocks.
+
+  ## Examples
+
+      execute "CREATE EXTENSION postgres_fdw", "DROP EXTENSION postgres_fdw"
+
+  """
+  def execute(up, down) when (is_binary(up) or is_list(up)) and
+                             (is_binary(down) or is_list(down)) do
+    Runner.execute %Command{up: up, down: down}
   end
 
   @doc """
@@ -627,7 +679,7 @@ defmodule Ecto.Migration do
     add(column, :naive_datetime, opts)
   end
 
-  def add(column, type, opts) when is_atom(column) do
+  def add(column, type, opts) when is_atom(column) and is_list(opts) do
     if opts[:scale] && !opts[:precision] do
       raise ArgumentError, "Column #{Atom.to_string(column)} is missing precision option"
     end
@@ -687,7 +739,8 @@ defmodule Ecto.Migration do
     * `:type` - column type, defaults to `:naive_datetime`
 
   """
-  def timestamps(opts \\ []) do
+  def timestamps(opts \\ []) when is_list(opts) do
+    opts = Keyword.merge(Runner.repo_config(:migration_timestamps, []), opts)
     opts = Keyword.put_new(opts, :null, false)
 
     {type, opts} = Keyword.pop(opts, :type, :naive_datetime)
@@ -728,7 +781,7 @@ defmodule Ecto.Migration do
     modify(column, :naive_datetime, opts)
   end
 
-  def modify(column, type, opts) when is_atom(column) do
+  def modify(column, type, opts) when is_atom(column) and is_list(opts) do
     if opts[:scale] && !opts[:precision] do
       raise ArgumentError, "Column #{Atom.to_string(column)} is missing precision option"
     end
@@ -769,11 +822,11 @@ defmodule Ecto.Migration do
     * `:column` - The foreign key column, default is `:id`
     * `:type`   - The foreign key type, default is `:bigserial`
     * `:on_delete` - What to perform if the referenced entry
-       is deleted. May be `:nothing`, `:delete_all` or
-       `:nilify_all`. Defaults to `:nothing`.
+       is deleted. May be `:nothing`, `:delete_all`,
+       `:nilify_all` or `:restrict`. Defaults to `:nothing`.
     * `:on_update` - What to perform if the referenced entry
-       is updated. May be `:nothing`, `:update_all` or
-       `:nilify_all`. Defaults to `:nothing`.
+       is updated. May be `:nothing`, `:update_all`,
+       `:nilify_all` or `:restrict`. Defaults to `:nothing`.
 
   """
   def references(table, opts \\ [])
@@ -782,14 +835,16 @@ defmodule Ecto.Migration do
     references(Atom.to_string(table), opts)
   end
 
-  def references(table, opts) when is_binary(table) do
+  def references(table, opts) when is_binary(table) and is_list(opts) do
+    repo_opts = Keyword.take(Runner.repo_config(:migration_primary_key, []), [:type])
+    opts = Keyword.merge(repo_opts, opts)
     reference = struct(%Reference{table: table}, opts)
 
-    unless reference.on_delete in [:nothing, :delete_all, :nilify_all] do
+    unless reference.on_delete in [:nothing, :delete_all, :nilify_all, :restrict] do
       raise ArgumentError, "unknown :on_delete value: #{inspect reference.on_delete}"
     end
 
-    unless reference.on_update in [:nothing, :update_all, :nilify_all] do
+    unless reference.on_update in [:nothing, :update_all, :nilify_all, :restrict] do
       raise ArgumentError, "unknown :on_update value: #{inspect reference.on_update}"
     end
 
@@ -802,7 +857,7 @@ defmodule Ecto.Migration do
   ## Examples
 
       create constraint("users", :price_must_be_positive, check: "price > 0")
-      create constraint("size_ranges", :no_overlap, exclude: ~s|gist (int4range("from", "to", '[]') WITH &&)|
+      create constraint("size_ranges", :no_overlap, exclude: ~s|gist (int4range("from", "to", '[]') WITH &&)|)
       drop   constraint("products", "price_must_be_positive")
 
   ## Options
@@ -817,7 +872,7 @@ defmodule Ecto.Migration do
     constraint(Atom.to_string(table), name, opts)
   end
 
-  def constraint(table, name, opts) when is_binary(table) do
+  def constraint(table, name, opts) when is_binary(table) and is_list(opts) do
     struct(%Constraint{table: table, name: name}, opts)
   end
 

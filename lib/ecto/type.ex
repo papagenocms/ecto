@@ -10,55 +10,65 @@ defmodule Ecto.Type do
 
   ## Example
 
-  Imagine you want to support your id field to be looked up as a
-  permalink. For example, you want the following query to work:
+  Imagine you want to store an URI struct as part of a schema in an 
+  url-shortening service. There isn't an Ecto field type to support 
+  that value at runtime, therefore a custom one is needed.
 
-      permalink = "10-how-to-be-productive-with-elixir"
-      from p in Post, where: p.id == ^permalink
+  You also want to query not only by the full url, but for example 
+  by specific ports used. This is possible by putting the URI data
+  into a map field instead of just storing the plain 
+  string representation.
 
-  If `id` is an integer field, Ecto will fail in the query above
-  because it cannot cast the string to an integer. By using a
-  custom type, we can provide special casting behaviour while
-  still keeping the underlying Ecto type the same:
+      from s in ShortUrl,
+        where: fragment("?->>? ILIKE ?", s.original_url, "port", "443")
 
-      defmodule Permalink do
+  So the custom type does need to handle the conversion from 
+  external data to runtime data (`c:cast/1`) as well as 
+  transforming that runtime data into the `:map` Ecto native type and 
+  back (`c:dump/1` and `c:load/1`).
+
+      defmodule EctoURI do
         @behaviour Ecto.Type
-        def type, do: :integer
+        def type, do: :map
 
-        # Provide our own casting rules.
-        def cast(string) when is_binary(string) do
-          case Integer.parse(string) do
-            {int, _} -> {:ok, int}
-            :error   -> :error
-          end
+        # Provide custom casting rules.
+        # Cast strings into the URI struct to be used at runtime
+        def cast(uri) when is_binary(uri) do
+          {:ok, URI.parse(uri)}
         end
 
-        # We should still accept integers
-        def cast(integer) when is_integer(integer), do: {:ok, integer}
+        # Accept casting of URI structs as well
+        def cast(%URI{} = uri), do: {:ok, uri}
 
         # Everything else is a failure though
         def cast(_), do: :error
 
         # When loading data from the database, we are guaranteed to
-        # receive an integer (as databases are strict) and we will
-        # just return it to be stored in the schema struct.
-        def load(integer) when is_integer(integer), do: {:ok, integer}
+        # receive a map (as databases are strict) and we will
+        # just put the data back into an URI struct to be stored 
+        # in the loaded schema struct.
+        def load(data) when is_map(data) do
+          data = 
+            for {key, val} <- data do
+              {String.to_existing_atom(key), val}
+            end
+          {:ok, struct!(URI, data)}
+        end
 
-        # When dumping data to the database, we *expect* an integer
-        # but any value could be inserted into the struct, so we need
-        # guard against them.
-        def dump(integer) when is_integer(integer), do: {:ok, integer}
+        # When dumping data to the database, we *expect* an URI struct
+        # but any value could be inserted into the schema struct at runtime,
+        # so we need to guard against them.
+        def dump(%URI{} = uri), do: {:ok, Map.from_struct(uri)}
         def dump(_), do: :error
       end
 
-  Now we can use our new field above as our primary key type in schemas:
+  Now we can use our new field type above in our schemas:
 
-      defmodule Post do
+      defmodule ShortUrl do
         use Ecto.Schema
 
-        @primary_key {:id, Permalink, autogenerate: true}
         schema "posts" do
-          ...
+          field :original_url, EctoURI
         end
       end
 
@@ -99,7 +109,7 @@ defmodule Ecto.Type do
 
   This callback is called on external input and can return any type,
   as long as the `dump/1` function is able to convert the returned
-  value back into an Ecto native type. There are two situations where
+  value into an Ecto native type. There are two situations where
   this callback is called:
 
     1. When casting values by `Ecto.Changeset`
@@ -342,12 +352,12 @@ defmodule Ecto.Type do
 
   defp dump_embed(%{cardinality: :one, related: schema, field: field},
                   value, fun) when is_map(value) do
-    {:ok, dump_embed(field, schema, value, schema.__schema__(:types), fun)}
+    {:ok, dump_embed(field, schema, value, schema.__schema__(:dump), fun)}
   end
 
   defp dump_embed(%{cardinality: :many, related: schema, field: field},
                   value, fun) when is_list(value) do
-    types = schema.__schema__(:types)
+    types = schema.__schema__(:dump)
     {:ok, Enum.map(value, &dump_embed(field, schema, &1, types, fun))}
   end
 
@@ -356,12 +366,15 @@ defmodule Ecto.Type do
   end
 
   defp dump_embed(_field, schema, %{__struct__: schema} = struct, types, dumper) do
-    Enum.reduce(types, %{}, fn {field, type}, acc ->
+    Enum.reduce(types, %{}, fn {field, {source, type}}, acc ->
       value = Map.get(struct, field)
 
       case dumper.(type, value) do
-        {:ok, value} -> Map.put(acc, field, value)
-        :error       -> raise ArgumentError, "cannot dump `#{inspect value}` as type #{inspect type}"
+        {:ok, value} ->
+          Map.put(acc, source, value)
+        :error ->
+          raise ArgumentError, "cannot dump `#{inspect value}` as type #{inspect type} " <>
+                               "for field `#{field}` in schema #{inspect schema}"
       end
     end)
   end
@@ -452,7 +465,7 @@ defmodule Ecto.Type do
   end
 
   defp load_embed(_field, schema, value, loader) when is_map(value) do
-    Ecto.Schema.__load__(schema, nil, nil, nil, value, loader)
+    Ecto.Schema.__unsafe_load__(schema, value, loader)
   end
 
   defp load_embed(field, _schema, value, _fun) do
@@ -537,6 +550,7 @@ defmodule Ecto.Type do
     cast_embed(type, value)
   end
 
+  def cast({:in, _type}, nil), do: :error
   def cast(_type, nil), do: {:ok, nil}
 
   def cast(:binary_id, value) when is_binary(value) do
@@ -667,8 +681,13 @@ defmodule Ecto.Type do
 
   defp cast_date(binary) when is_binary(binary) do
     case Date.from_iso8601(binary) do
-      {:ok, _} = ok -> ok
-      {:error, _} -> :error
+      {:ok, _} = ok ->
+        ok
+      {:error, _} ->
+        case NaiveDateTime.from_iso8601(binary) do
+          {:ok, naive_datetime} -> {:ok, NaiveDateTime.to_date(naive_datetime)}
+          {:error, _} -> :error
+        end
     end
   end
   defp cast_date(%{"year" => empty, "month" => empty, "day" => empty}) when empty in ["", nil],
@@ -698,6 +717,8 @@ defmodule Ecto.Type do
   defp dump_date(_),
     do: :error
 
+  defp load_date(%Date{} = date),
+    do: {:ok, date}
   defp load_date({year, month, day}),
     do: {:ok, %Date{year: year, month: month, day: day}}
   defp load_date(_),
@@ -705,6 +726,8 @@ defmodule Ecto.Type do
 
   ## Time
 
+  defp cast_time(<<hour::2-bytes, ?:, minute::2-bytes>>),
+    do: cast_time(to_i(hour), to_i(minute), 0, nil)
   defp cast_time(binary) when is_binary(binary) do
     case Time.from_iso8601(binary) do
       {:ok, _} = ok -> ok
@@ -749,6 +772,8 @@ defmodule Ecto.Type do
   defp dump_time(_),
     do: :error
 
+  defp load_time(%Time{} = time),
+    do: {:ok, time}
   defp load_time({hour, minute, second, microsecond}),
     do: {:ok, %Time{hour: hour, minute: minute, second: second, microsecond: {microsecond, 6}}}
   defp load_time({hour, minute, second}),
@@ -779,6 +804,9 @@ defmodule Ecto.Type do
       end
     end
   end
+  defp cast_naive_datetime(_) do
+    :error
+  end
 
   defp dump_naive_datetime(%NaiveDateTime{year: year, month: month, day: day,
                                           hour: hour, minute: minute, second: second, microsecond: {microsecond, _}}),
@@ -788,6 +816,8 @@ defmodule Ecto.Type do
   defp dump_naive_datetime(_),
     do: :error
 
+  defp load_naive_datetime(%NaiveDateTime{} = naive),
+    do: {:ok, naive}
   defp load_naive_datetime({{year, month, day}, {hour, minute, second, microsecond}}),
     do: {:ok, %NaiveDateTime{year: year, month: month, day: day,
                              hour: hour, minute: minute, second: second, microsecond: {microsecond, 6}}}
@@ -799,13 +829,28 @@ defmodule Ecto.Type do
 
   ## UTC datetime
 
+  defp cast_utc_datetime(binary) when is_binary(binary) do
+    case DateTime.from_iso8601(binary) do
+      {:ok, datetime, _offset} -> {:ok, datetime}
+      {:error, :missing_offset} ->
+        case NaiveDateTime.from_iso8601(binary) do
+          {:ok, naive_datetime} -> {:ok, DateTime.from_naive!(naive_datetime, "Etc/UTC")}
+          {:error, _} -> :error
+        end
+      {:error, _} -> :error
+    end
+  end
+  defp cast_utc_datetime(%DateTime{time_zone: "Etc/UTC"} = datetime), do: {:ok, datetime}
+  defp cast_utc_datetime(%DateTime{} = datetime) do
+    case (datetime |> DateTime.to_unix() |> DateTime.from_unix()) do
+      {:ok, _} = ok -> ok
+      {:error, _} -> :error
+    end
+  end
   defp cast_utc_datetime(value) do
     case cast_naive_datetime(value) do
-      {:ok, %NaiveDateTime{year: year, month: month, day: day,
-                           hour: hour, minute: minute, second: second, microsecond: microsecond}} ->
-        {:ok, %DateTime{year: year, month: month, day: day,
-                        hour: hour, minute: minute, second: second, microsecond: microsecond,
-                        std_offset: 0, utc_offset: 0, zone_abbr: "UTC", time_zone: "Etc/UTC"}}
+      {:ok, %NaiveDateTime{} = naive_datetime} ->
+        {:ok, DateTime.from_naive!(naive_datetime, "Etc/UTC")}
       {:ok, _} = ok ->
         ok
       :error ->
@@ -821,6 +866,8 @@ defmodule Ecto.Type do
   defp dump_utc_datetime(_),
     do: :error
 
+  defp load_utc_datetime(%DateTime{} = dt),
+    do: {:ok, dt}
   defp load_utc_datetime({{year, month, day}, {hour, minute, second, microsecond}}),
     do: {:ok, %DateTime{year: year, month: month, day: day,
                         hour: hour, minute: minute, second: second, microsecond: {microsecond, 6},

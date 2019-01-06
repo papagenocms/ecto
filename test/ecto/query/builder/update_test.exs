@@ -60,6 +60,11 @@ defmodule Ecto.Query.Builder.UpdateTest do
       [runtime] = query.updates
       assert runtime.expr == [set: [foo: {:^, [], [0]}], inc: [bar: {:^, [], [1]}]]
       assert runtime.params == [{"foo", {0, :foo}}, {"bar", {0, :bar}}]
+
+      query = "foo" |> update([_], set: [{^:foo, ^"foo"}])
+      [runtime] = query.updates
+      assert runtime.expr == [set: [foo: {:^, [], [0]}]]
+      assert runtime.params == [{"foo", {0, :foo}}]
     end
 
     test "accepts dynamic expressions with values" do
@@ -70,6 +75,10 @@ defmodule Ecto.Query.Builder.UpdateTest do
       assert update.params == []
 
       %{updates: [update]} = update("foo", [_], set: ^[foo: dynamic])
+      assert Macro.to_string(update.expr) == "[set: [foo: true]]"
+      assert update.params == []
+
+      %{updates: [update]} = update("foo", [_], ^[set: [foo: dynamic]])
       assert Macro.to_string(update.expr) == "[set: [foo: true]]"
       assert update.params == []
     end

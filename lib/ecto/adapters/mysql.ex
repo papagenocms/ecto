@@ -55,6 +55,17 @@ defmodule Ecto.Adapters.MySQL do
     * `:collation` - the collation order
     * `:dump_path` - where to place dumped structures
 
+  ### After connect callback
+
+  If you want to execute a callback as soon as connection is established
+  to the database, you can use the `:after_connect` configuration. For
+  example, in your repository configuration you can add:
+
+    after_connect: {Mariaex, :query!, ["SET variable = value", []]}
+
+  You can also specify your own module that will receive the Mariaex
+  connection as argument.
+
   ## Limitations
 
   There are some limitations when using Ecto with MySQL that one
@@ -95,6 +106,12 @@ defmodule Ecto.Adapters.MySQL do
   datetimes and timestamps with MySQL, be aware of such
   differences and consult the documentation for your MySQL
   version.
+
+  Assuming your version of MySQL supports microsecond precision,
+  you will need to explicitly set it on the relevant columns
+  in your migration. For explicitly declared columns you can
+  add the `size: 6` option. If you're using the `timestamps()`
+  helper you can use `timestamps(size: 6)`.
   """
 
   # Inherit all behaviour from Ecto.Adapters.SQL
@@ -110,6 +127,7 @@ defmodule Ecto.Adapters.MySQL do
   def loaders(:map, type),            do: [&json_decode/1, type]
   def loaders({:map, _}, type),       do: [&json_decode/1, type]
   def loaders(:boolean, type),        do: [&bool_decode/1, type]
+  def loaders(:float, type),          do: [&float_decode/1, type]
   def loaders(:binary_id, type),      do: [Ecto.UUID, type]
   def loaders({:embed, _} = type, _), do: [&json_decode/1, &Ecto.Adapters.SQL.load_embed(type, &1)]
   def loaders(_, type),               do: [type]
@@ -119,6 +137,9 @@ defmodule Ecto.Adapters.MySQL do
   defp bool_decode(0), do: {:ok, false}
   defp bool_decode(1), do: {:ok, true}
   defp bool_decode(x), do: {:ok, x}
+
+  defp float_decode(%Decimal{} = decimal), do: {:ok, Decimal.to_float(decimal)}
+  defp float_decode(x), do: {:ok, x}
 
   defp json_decode(x) when is_binary(x),
     do: {:ok, Application.get_env(:ecto, :json_library).decode!(x)}
@@ -264,7 +285,7 @@ defmodule Ecto.Adapters.MySQL do
 
     opts =
       opts
-      |> Keyword.delete(:name)
+      |> Keyword.drop([:name, :log])
       |> Keyword.put(:pool, DBConnection.Connection)
       |> Keyword.put(:backoff_type, :stop)
 

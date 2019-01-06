@@ -11,8 +11,14 @@ defmodule Ecto.MigrationTest do
   alias Ecto.Migration.Runner
 
   setup meta do
-    {:ok, runner} =
-      Runner.start_link(self(), TestRepo, meta[:direction] || :forward, :up, %{level: false, sql: false})
+    config = Application.get_env(:ecto, TestRepo, [])
+    Application.put_env(:ecto, TestRepo, Keyword.merge(config, meta[:repo_config] || []))
+    on_exit fn -> Application.put_env(:ecto, TestRepo, config) end
+  end
+
+  setup meta do
+    direction = meta[:direction] || :forward
+    {:ok, runner} = Runner.start_link(self(), TestRepo, direction, :up, %{level: false, sql: false})
     Runner.metadata(runner, meta)
     {:ok, runner: runner}
   end
@@ -72,6 +78,10 @@ defmodule Ecto.MigrationTest do
            %Constraint{table: "posts", name: :exclude_price, exclude: "price"}
     assert constraint("posts", :exclude_price, exclude: "price") ==
            %Constraint{table: "posts", name: :exclude_price, exclude: "price"}
+  end
+
+  test "runs a reversible command" do
+    assert execute("SELECT 1", "SELECT 2") == :ok
   end
 
   test "chokes on alias types" do
@@ -135,6 +145,30 @@ defmodule Ecto.MigrationTest do
     assert last_command() ==
            {:create, table,
               [{:add, :title, :string, []}]}
+  end
+
+  @tag repo_config: [migration_primary_key: [name: :uuid, type: :uuid]]
+  test "forward: create a table with custom primary key" do
+    create(table = table(:posts)) do
+    end
+    flush()
+
+    assert last_command() ==
+           {:create, table, [{:add, :uuid, :uuid, [primary_key: true]}]}
+  end
+
+  @tag repo_config: [migration_timestamps: [type: :utc_datetime, null: true]]
+  test "forward: create a table with timestamps" do
+    create(table = table(:posts)) do
+      timestamps()
+    end
+    flush()
+
+    assert last_command() ==
+           {:create, table, [
+              {:add, :id, :bigserial, [primary_key: true]},
+              {:add, :inserted_at, :utc_datetime, [null: true]},
+              {:add, :updated_at, :utc_datetime, [null: true]}]}
   end
 
   test "forward: creates a table without precision option for numeric type" do
@@ -389,6 +423,12 @@ defmodule Ecto.MigrationTest do
     assert index.prefix == "foo"
   end
 
+  test "forward: executes a command" do
+    execute "SELECT 1", "SELECT 2"
+    flush()
+    assert "SELECT 1" = last_command()
+  end
+
   ## Reverse
   @moduletag direction: :backward
 
@@ -466,6 +506,23 @@ defmodule Ecto.MigrationTest do
     rename table(:posts), to: table(:new_posts)
     flush()
     assert {:rename, %Table{name: "new_posts"}, %Table{name: "posts"}} = last_command()
+  end
+
+  test "backward: reverses a command" do
+    execute "SELECT 1", "SELECT 2"
+    flush()
+    assert "SELECT 2" = last_command()
+  end
+
+  test "references foreign keys types must be the same as primary defaults" do
+    %{runner: runner} = Process.get(:ecto_migration)
+    Agent.update(runner, fn state ->
+      config = Keyword.put(state.config, :migration_primary_key, [type: :binary_id])
+      Map.put(state, :config, config)
+    end)
+
+    assert references(:posts) ==
+           %Reference{table: "posts", column: :id, type: :binary_id}
   end
 
   defp last_command(), do: Process.get(:last_command)

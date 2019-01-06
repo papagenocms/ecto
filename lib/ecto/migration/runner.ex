@@ -2,13 +2,12 @@ defmodule Ecto.Migration.Runner do
   # A GenServer responsible for running migrations
   # in either `:forward` or `:backward` directions.
   @moduledoc false
-
-  use GenServer
   require Logger
 
   alias Ecto.Migration.Table
   alias Ecto.Migration.Index
   alias Ecto.Migration.Constraint
+  alias Ecto.Migration.Command
 
   @doc """
   Runs the given migration.
@@ -46,7 +45,7 @@ defmodule Ecto.Migration.Runner do
     Agent.start_link(fn ->
       Process.link(parent)
       %{direction: direction, repo: repo, migrator_direction: migrator_direction,
-        command: nil, subcommands: [], log: log, commands: []}
+        command: nil, subcommands: [], log: log, commands: [], config: repo.config()}
     end)
   end
 
@@ -55,6 +54,13 @@ defmodule Ecto.Migration.Runner do
   """
   def stop() do
     Agent.stop(runner())
+  end
+
+  @doc """
+  Accesses the given repository configuration.
+  """
+  def repo_config(key, default) do
+    Agent.get(runner(), &Keyword.get(&1.config, key, default))
   end
 
   @doc """
@@ -152,16 +158,16 @@ defmodule Ecto.Migration.Runner do
   ## Execute
   @creates [:create, :create_if_not_exists]
 
+  defp execute_in_direction(repo, :forward, log, %Command{up: up}) do
+    log_and_execute_ddl(repo, log, up)
+  end
+
   defp execute_in_direction(repo, :forward, log, command) do
     log_and_execute_ddl(repo, log, command)
   end
 
-  defp execute_in_direction(repo, :backward, log, {command, %Index{} = index}) when command in @creates do
-    log_and_execute_ddl(repo, log, {:drop, index})
-  end
-
-  defp execute_in_direction(repo, :backward, log, {:drop, %Index{} = index}) do
-    log_and_execute_ddl(repo, log, {:create, index})
+  defp execute_in_direction(repo, :backward, log, %Command{down: down}) do
+    log_and_execute_ddl(repo, log, down)
   end
 
   defp execute_in_direction(repo, :backward, log, command) do
@@ -174,6 +180,11 @@ defmodule Ecto.Migration.Runner do
     end
   end
 
+  defp reverse({command, %Index{} = index}) when command in @creates,
+    do: {:drop, index}
+  defp reverse({:drop, %Index{} = index}),
+    do: {:create, index}
+
   defp reverse({command, %Table{} = table, _columns}) when command in @creates,
     do: {:drop, table}
   defp reverse({:alter,  %Table{} = table, changes}) do
@@ -185,6 +196,7 @@ defmodule Ecto.Migration.Runner do
     do: {:rename, table_new, table_current}
   defp reverse({:rename, %Table{} = table, current_column, new_column}),
     do: {:rename, table, new_column, current_column}
+
   defp reverse({command, %Constraint{} = constraint}) when command in @creates,
     do: {:drop, constraint}
   defp reverse(_command), do: false

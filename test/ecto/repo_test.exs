@@ -10,10 +10,11 @@ defmodule Ecto.RepoTest do
 
     schema "my_schema" do
       field :x, :string
-      field :y, :binary
+      field :y, :binary, source: :yyy
       field :z, :string, default: "z"
       field :array, {:array, :string}
       field :map, {:map, :string}
+      belongs_to :another, MySchema.Another
     end
   end
 
@@ -24,6 +25,14 @@ defmodule Ecto.RepoTest do
     schema "my_schema" do
       field :x, :string
     end
+  end
+
+  test "defines child_spec/1" do
+    assert TestRepo.child_spec([]) == %{
+      id: TestRepo,
+      start: {TestRepo, :start_link, [[]]},
+      type: :supervisor
+    }
   end
 
   test "needs schema with primary key field" do
@@ -171,20 +180,62 @@ defmodule Ecto.RepoTest do
     assert {:ok, %MySchema{}} = TestRepo.delete(valid)
   end
 
+  test "insert, update, insert_or_update and delete sets schema prefix" do
+    valid = Ecto.Changeset.cast(%MySchema{id: 1}, %{x: "foo"}, [:x])
+
+    assert {:ok, schema} = TestRepo.insert(valid, prefix: "public")
+    {schema_prefix, _} = schema.__meta__.source
+    assert schema_prefix == "public"
+
+    assert {:ok, schema} = TestRepo.update(valid, prefix: "public")
+    {schema_prefix, _} = schema.__meta__.source
+    assert schema_prefix == "public"
+
+    assert {:ok, schema} = TestRepo.delete(valid, prefix: "public")
+    {schema_prefix, _} = schema.__meta__.source
+    assert schema_prefix == "public"
+  end
+
+  test "insert, update, and delete sets schema prefix from changeset repo opts" do
+    valid =
+      %MySchema{id: 1}
+      |> Ecto.Changeset.cast(%{x: "foo"}, [:x])
+      |> Map.put(:repo_opts, [prefix: "public"])
+
+    assert {:ok, schema} = TestRepo.insert(valid, prefix: "public")
+    {schema_prefix, _} = schema.__meta__.source
+    assert schema_prefix == "public"
+
+    assert {:ok, schema} = TestRepo.update(valid, prefix: "public")
+    {schema_prefix, _} = schema.__meta__.source
+    assert schema_prefix == "public"
+
+    assert {:ok, schema} = TestRepo.delete(valid, prefix: "public")
+    {schema_prefix, _} = schema.__meta__.source
+    assert schema_prefix == "public"
+  end
+
   test "insert, update, insert_or_update and delete errors on invalid changeset" do
     invalid = %Ecto.Changeset{valid?: false, data: %MySchema{}}
 
     insert = %{invalid | action: :insert, repo: TestRepo}
     assert {:error, ^insert} = TestRepo.insert(invalid)
+    assert {:error, ^insert} = TestRepo.insert_or_update(invalid)
 
     update = %{invalid | action: :update, repo: TestRepo}
     assert {:error, ^update} = TestRepo.update(invalid)
 
-    update = %{invalid | action: :insert, repo: TestRepo}
-    assert {:error, ^update} = TestRepo.insert_or_update(invalid)
-
     delete = %{invalid | action: :delete, repo: TestRepo}
     assert {:error, ^delete} = TestRepo.delete(invalid)
+
+    ignore = %{invalid | action: :ignore, repo: TestRepo}
+    assert {:error, ^insert} = TestRepo.insert(ignore)
+    assert {:error, ^update} = TestRepo.update(ignore)
+    assert {:error, ^delete} = TestRepo.delete(ignore)
+
+    assert_raise ArgumentError, ~r"a valid changeset with action :ignore was given to Ecto.TestRepo.insert/2", fn ->
+      TestRepo.insert(%{ignore | valid?: true})
+    end
   end
 
   test "insert!, update! and delete! accepts changesets" do
@@ -347,6 +398,16 @@ defmodule Ecto.RepoTest do
       refute changeset.valid?
     end
 
+    test "are mapped to repo constraint violation using prefix match" do
+      my_schema = %MySchema{id: 1}
+      changeset =
+        put_in(my_schema.__meta__.context, {:invalid, [unique: "foo_table_custom_foo_index"]})
+        |> Ecto.Changeset.change(x: "foo")
+        |> Ecto.Changeset.unique_constraint(:foo, name: "foo_table_custom_foo", match: :prefix)
+      assert {:error, changeset} = TestRepo.insert(changeset)
+      refute changeset.valid?
+    end
+
     test "may fail to map to repo constraint violation on name" do
       my_schema = %MySchema{id: 1}
       changeset =
@@ -379,7 +440,7 @@ defmodule Ecto.RepoTest do
 
     test "raises on non-empty conflict_target with on_conflict raise" do
       assert_raise ArgumentError, ":conflict_target option is forbidden when :on_conflict is :raise", fn ->
-        TestRepo.insert(%MySchema{id: 1}, on_conflict: :raise, conflict_target: :oops)
+        TestRepo.insert(%MySchema{id: 1}, on_conflict: :raise, conflict_target: [:id])
       end
     end
 
@@ -397,7 +458,15 @@ defmodule Ecto.RepoTest do
     end
   end
 
-  test "Repo.load/2" do
+  describe "insert_all" do
+    test "raises when on associations" do
+      assert_raise ArgumentError, fn ->
+        TestRepo.insert_all MySchema, [%{another: nil}]
+      end
+    end
+  end
+
+  test "load/2" do
     # string fields
     assert %MySchema{x: "abc"} =
            TestRepo.load(MySchema, %{"x" => "abc"})
@@ -422,6 +491,10 @@ defmodule Ecto.RepoTest do
     assert %MySchema{x: "abc", z: "z"} =
            TestRepo.load(MySchema, %{x: "abc"})
 
+    # source field
+    assert %MySchema{y: "abc"} =
+           TestRepo.load(MySchema, %{yyy: "abc"})
+
     # array field
     assert %MySchema{array: ["one", "two"]} =
            TestRepo.load(MySchema, %{array: ["one", "two"]})
@@ -443,7 +516,7 @@ defmodule Ecto.RepoTest do
            TestRepo.load(MySchema, %{bad: "bad"})
 
     # invalid value
-    assert_raise ArgumentError, "cannot load `0` as type :string for :x in schema Ecto.RepoTest.MySchema", fn ->
+    assert_raise ArgumentError, "cannot load `0` as type :string for field `x` in schema Ecto.RepoTest.MySchema", fn ->
       TestRepo.load(MySchema, %{x: 0})
     end
 

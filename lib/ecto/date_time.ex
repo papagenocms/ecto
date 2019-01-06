@@ -1,4 +1,4 @@
-# TODO: Remove Ecto.Date|Time types on Ecto v2.2
+# TODO: Remove Ecto.Date|Time types on Ecto v2.3
 import Kernel, except: [to_string: 1]
 
 defmodule Ecto.DateTime.Utils do
@@ -86,6 +86,15 @@ defmodule Ecto.DateTime.Utils do
 end
 
 defmodule Ecto.Date do
+  @moduledoc """
+  A deprecated Ecto type for dates.
+
+  This type is deprecated in favour of the `:date` type.
+  """
+
+  @behaviour Ecto.Type
+  defstruct [:year, :month, :day]
+
   import Ecto.DateTime.Utils
 
   @doc """
@@ -95,13 +104,6 @@ defmodule Ecto.Date do
   against `t2` and returns `:lt`, `:eq` or `:gt`.
   """
   defdelegate compare(t1, t2), to: Ecto.DateTime.Utils
-
-  @moduledoc """
-  An Ecto type for dates.
-  """
-
-  @behaviour Ecto.Type
-  defstruct [:year, :month, :day]
 
   @doc """
   The Ecto primitive type.
@@ -134,7 +136,7 @@ defmodule Ecto.Date do
   def cast!(value) do
     case cast(value) do
       {:ok, date} -> date
-      :error -> raise Ecto.CastError, "cannot cast #{inspect value} to date"
+      :error -> raise Ecto.CastError, type: __MODULE__, value: value
     end
   end
 
@@ -223,6 +225,15 @@ defmodule Ecto.Date do
 end
 
 defmodule Ecto.Time do
+  @moduledoc """
+  A deprecated Ecto type for time.
+
+  This type is deprecated in favour of the `:time` type.
+  """
+
+  @behaviour Ecto.Type
+  defstruct [:hour, :min, :sec, usec: 0]
+
   import Ecto.DateTime.Utils
 
   @doc """
@@ -232,13 +243,6 @@ defmodule Ecto.Time do
   against `t2` and returns `:lt`, `:eq` or `:gt`.
   """
   defdelegate compare(t1, t2), to: Ecto.DateTime.Utils
-
-  @moduledoc """
-  An Ecto type for time.
-  """
-
-  @behaviour Ecto.Type
-  defstruct [:hour, :min, :sec, usec: 0]
 
   @doc """
   The Ecto primitive type.
@@ -301,7 +305,7 @@ defmodule Ecto.Time do
   def cast!(value) do
     case cast(value) do
       {:ok, time} -> time
-      :error -> raise Ecto.CastError, "cannot cast #{inspect value} to time"
+      :error -> raise Ecto.CastError, type: __MODULE__, value: value
     end
   end
 
@@ -384,6 +388,15 @@ defmodule Ecto.Time do
 end
 
 defmodule Ecto.DateTime do
+  @moduledoc """
+  A deprecated Ecto type that includes a date and a time.
+
+  This type is deprecated in favour of the `:naive_datetime` type.
+  """
+
+  @behaviour Ecto.Type
+  defstruct [:year, :month, :day, :hour, :min, :sec, usec: 0]
+
   import Ecto.DateTime.Utils
 
   @unix_epoch :calendar.datetime_to_gregorian_seconds {{1970, 1, 1}, {0, 0, 0}}
@@ -395,13 +408,6 @@ defmodule Ecto.DateTime do
   against `t2` and returns `:lt`, `:eq` or `:gt`.
   """
   defdelegate compare(t1, t2), to: Ecto.DateTime.Utils
-
-  @moduledoc """
-  An Ecto type that includes a date and a time.
-  """
-
-  @behaviour Ecto.Type
-  defstruct [:year, :month, :day, :hour, :min, :sec, usec: 0]
 
   @doc """
   The Ecto primitive type.
@@ -434,7 +440,7 @@ defmodule Ecto.DateTime do
   def cast!(value) do
     case cast(value) do
       {:ok, datetime} -> datetime
-      :error -> raise Ecto.CastError, "cannot cast #{inspect value} to datetime"
+      :error -> raise Ecto.CastError, type: __MODULE__, value: value
     end
   end
 
@@ -618,7 +624,7 @@ defmodule Ecto.DateTime do
   end
 
   def from_unix!(integer, unit) do
-    total = System.convert_time_unit(integer, unit, :microseconds)
+    total = System.convert_time_unit(integer, unit, :microsecond)
     microsecond = rem(total, 1_000_000)
     {{year, month, day}, {hour, minute, second}} =
       :calendar.gregorian_seconds_to_datetime(@unix_epoch + div(total, 1_000_000))

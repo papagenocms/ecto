@@ -1,7 +1,7 @@
 if Code.ensure_loaded?(Postgrex) do
   Postgrex.Types.define(Ecto.Adapters.Postgres.TypeModule,
                         Ecto.Adapters.Postgres.extensions(),
-                        json: Application.get_env(:ecto, :json_library, Poison))
+                        json: Ecto.Adapter.json_library())
 
   defmodule Ecto.Adapters.Postgres.Connection do
     @moduledoc false
@@ -131,7 +131,7 @@ if Code.ensure_loaded?(Postgrex) do
       offset   = offset(query, sources)
       lock     = lock(query.lock)
 
-      IO.iodata_to_binary([select, from, join, where, group_by, having, order_by, limit, offset | lock])
+      [select, from, join, where, group_by, having, order_by, limit, offset | lock]
     end
 
     def update_all(%{from: from} = query, prefix \\ nil) do
@@ -143,7 +143,7 @@ if Code.ensure_loaded?(Postgrex) do
       {join, wheres} = using_join(query, :update_all, "FROM", sources)
       where = where(%{query | wheres: wheres ++ query.wheres}, sources)
 
-      IO.iodata_to_binary([prefix, fields, join, where | returning(query, sources)])
+      [prefix, fields, join, where | returning(query, sources)]
     end
 
     def delete_all(%{from: from} = query) do
@@ -153,7 +153,7 @@ if Code.ensure_loaded?(Postgrex) do
       {join, wheres} = using_join(query, :delete_all, "USING", sources)
       where = where(%{query | wheres: wheres ++ query.wheres}, sources)
 
-      IO.iodata_to_binary(["DELETE FROM ", from, " AS ", name, join, where | returning(query, sources)])
+      ["DELETE FROM ", from, " AS ", name, join, where | returning(query, sources)]
     end
 
     def insert(prefix, table, header, rows, on_conflict, returning) do
@@ -164,8 +164,8 @@ if Code.ensure_loaded?(Postgrex) do
           [?\s, ?(, intersperse_map(header, ?,, &quote_name/1), ") VALUES " | insert_all(rows, 1)]
         end
 
-      IO.iodata_to_binary(["INSERT INTO ", quote_table(prefix, table), insert_as(on_conflict),
-                           values, on_conflict(on_conflict, header) | returning(returning)])
+      ["INSERT INTO ", quote_table(prefix, table), insert_as(on_conflict),
+       values, on_conflict(on_conflict, header) | returning(returning)]
     end
 
     defp insert_as({%{from: from} = query, _, _}) do
@@ -185,6 +185,8 @@ if Code.ensure_loaded?(Postgrex) do
     defp on_conflict({query, _, targets}, _header),
       do: [" ON CONFLICT ", conflict_target(targets), "DO " | update_all(query, "UPDATE SET ")]
 
+    defp conflict_target({:constraint, constraint}),
+      do: ["ON CONSTRAINT ", quote_name(constraint), ?\s]
     defp conflict_target([]),
       do: []
     defp conflict_target(targets),
@@ -224,8 +226,8 @@ if Code.ensure_loaded?(Postgrex) do
         {[quote_name(field), " = $" | Integer.to_string(acc)], acc + 1}
       end)
 
-      IO.iodata_to_binary(["UPDATE ", quote_table(prefix, table), " SET ",
-                           fields, " WHERE ", filters | returning(returning)])
+      ["UPDATE ", quote_table(prefix, table), " SET ",
+       fields, " WHERE ", filters | returning(returning)]
     end
 
     def delete(prefix, table, filters, returning) do
@@ -233,8 +235,7 @@ if Code.ensure_loaded?(Postgrex) do
         {[quote_name(field), " = $" | Integer.to_string(acc)], acc + 1}
       end)
 
-      IO.iodata_to_binary(["DELETE FROM ", quote_table(prefix, table), " WHERE ",
-                           filters | returning(returning)])
+      ["DELETE FROM ", quote_table(prefix, table), " WHERE ", filters | returning(returning)]
     end
 
     ## Query generation
@@ -335,9 +336,12 @@ if Code.ensure_loaded?(Postgrex) do
       [?\s | intersperse_map(joins, ?\s, fn
         %JoinExpr{on: %QueryExpr{expr: expr}, qual: qual, ix: ix, source: source} ->
           {join, name} = get_source(query, sources, ix, source)
-          [join_qual(qual), join, " AS ", name, " ON " | expr(expr, sources, query)]
+          [join_qual(qual), join, " AS ", name | join_on(qual, expr, sources, query)]
       end)]
     end
+
+    defp join_on(:cross, true, _sources, _query), do: []
+    defp join_on(_qual, expr, sources, query), do: [" ON " | expr(expr, sources, query)]
 
     defp join_qual(:inner), do: "INNER JOIN "
     defp join_qual(:inner_lateral), do: "INNER JOIN LATERAL "
@@ -418,13 +422,10 @@ if Code.ensure_loaded?(Postgrex) do
       quote_qualified_name(field, sources, idx)
     end
 
-    defp expr({:&, _, [idx, fields, _counter]}, sources, query) do
-      {source, name, schema} = elem(sources, idx)
-      if is_nil(schema) and is_nil(fields) do
-        error!(query, "PostgreSQL does not support selecting all fields from #{source} without a schema. " <>
-                      "Please specify a schema or specify exactly which fields you want to select")
-      end
-      intersperse_map(fields, ", ", &[name, ?. | quote_name(&1)])
+    defp expr({:&, _, [idx]}, sources, query) do
+      {source, _name, _schema} = elem(sources, idx)
+      error!(query, "PostgreSQL does not support selecting all fields from #{source} without a schema. " <>
+                    "Please specify a schema or specify exactly which fields you want to select")
     end
 
     defp expr({:in, _, [_left, []]}, _sources, _query) do
@@ -452,8 +453,8 @@ if Code.ensure_loaded?(Postgrex) do
       ["NOT (", expr(expr, sources, query), ?)]
     end
 
-    defp expr(%Ecto.SubQuery{query: query, fields: fields}, _sources, _query) do
-      query.select.fields |> put_in(fields) |> all()
+    defp expr(%Ecto.SubQuery{query: query}, _sources, _query) do
+      all(query)
     end
 
     defp expr({:fragment, _, [kw]}, _sources, query) when is_list(kw) or tuple_size(kw) == 3 do
@@ -507,7 +508,7 @@ if Code.ensure_loaded?(Postgrex) do
     end
 
     defp expr(%Ecto.Query.Tagged{value: other, type: type}, sources, query) do
-      [expr(other, sources, query), ?:, ?: | ecto_to_db(type)]
+      [expr(other, sources, query), ?:, ?: | tagged_to_db(type)]
     end
 
     defp expr(nil, _sources, _query),   do: "NULL"
@@ -525,6 +526,12 @@ if Code.ensure_loaded?(Postgrex) do
     defp expr(literal, _sources, _query) when is_float(literal) do
       [Float.to_string(literal) | "::float"]
     end
+
+    defp tagged_to_db({:array, type}), do: [tagged_to_db(type), ?[, ?]]
+    # Always use the largest possible type for integers
+    defp tagged_to_db(:id), do: "bigint"
+    defp tagged_to_db(:integer), do: "bigint"
+    defp tagged_to_db(type), do: ecto_to_db(type)
 
     defp interval(count, interval, _sources, _query) when is_integer(count) do
       ["interval '", String.Chars.Integer.to_string(count), ?\s, interval, ?\']
@@ -566,7 +573,7 @@ if Code.ensure_loaded?(Postgrex) do
       current =
         case elem(sources, pos) do
           {table, schema} ->
-            name = [String.first(table) | Integer.to_string(pos)]
+            name = [create_alias(table) | Integer.to_string(pos)]
             {quote_table(prefix, table), name, schema}
           {:fragment, _, _} ->
             {nil, [?f | Integer.to_string(pos)], nil}
@@ -578,6 +585,13 @@ if Code.ensure_loaded?(Postgrex) do
 
     defp create_names(_prefix, _sources, pos, pos) do
       []
+    end
+
+    defp create_alias(<<first, _rest::binary>>) when first in ?a..?z when first in ?A..?Z do
+      <<first>>
+    end
+    defp create_alias(_) do
+      "t"
     end
 
     # DDL
@@ -785,11 +799,15 @@ if Code.ensure_loaded?(Postgrex) do
       do: [" DEFAULT '", escape_string(literal), ?']
     defp default_expr({:ok, literal}, _type) when is_number(literal) or is_boolean(literal),
       do: [" DEFAULT ", to_string(literal)]
+    defp default_expr({:ok, %{} = map}, :map) do
+      default = Ecto.Adapter.json_library().encode!(map)
+      [" DEFAULT ", single_quote(default)]
+    end
     defp default_expr({:ok, {:fragment, expr}}, _type),
       do: [" DEFAULT ", expr]
     defp default_expr({:ok, expr}, type),
       do: raise(ArgumentError, "unknown default `#{inspect expr}` for type `#{inspect type}`. " <>
-                               ":default may be a string, number, boolean, empty list or a fragment(...)")
+                               ":default may be a string, number, boolean, empty list, map (when type is Map), or a fragment(...)")
     defp default_expr(:error, _),
       do: []
 
@@ -843,10 +861,12 @@ if Code.ensure_loaded?(Postgrex) do
 
     defp reference_on_delete(:nilify_all), do: " ON DELETE SET NULL"
     defp reference_on_delete(:delete_all), do: " ON DELETE CASCADE"
+    defp reference_on_delete(:restrict), do: " ON DELETE RESTRICT"
     defp reference_on_delete(_), do: []
 
     defp reference_on_update(:nilify_all), do: " ON UPDATE SET NULL"
     defp reference_on_update(:update_all), do: " ON UPDATE CASCADE"
+    defp reference_on_update(:restrict), do: " ON UPDATE RESTRICT"
     defp reference_on_update(_), do: []
 
     ## Helpers

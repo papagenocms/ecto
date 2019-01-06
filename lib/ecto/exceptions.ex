@@ -131,7 +131,14 @@ defmodule Ecto.CastError do
   @moduledoc """
   Raised when a changeset can't cast a value.
   """
-  defexception [:message]
+  defexception [:message, :type, :value]
+
+  def exception(opts) do
+    type  = Keyword.fetch!(opts, :type)
+    value = Keyword.fetch!(opts, :value)
+    msg   = opts[:message] || "cannot cast #{inspect value} to #{inspect type}"
+    %__MODULE__{message: msg, type: type, value: value}
+  end
 end
 
 defmodule Ecto.InvalidURLError do
@@ -204,6 +211,30 @@ defmodule Ecto.MultipleResultsError do
     expected at most one result but got #{count} in query:
 
     #{Inspect.Ecto.Query.to_string(query)}
+    """
+
+    %__MODULE__{message: msg}
+  end
+end
+
+defmodule Ecto.MultiplePrimaryKeyError do
+  defexception [:message]
+
+  def exception(opts) do
+    operation = Keyword.fetch!(opts, :operation)
+    source = Keyword.fetch!(opts, :source)
+    params = Keyword.fetch!(opts, :params)
+    count = Keyword.fetch!(opts, :count)
+
+    msg = """
+    expected #{operation} on #{source} to return at most one entry but got #{count} entries.
+
+    This typically means the field(s) set as primary_key in your schema/source
+    are not enough to uniquely identify entries in the repository.
+
+    Those are the parameters sent to the repository:
+
+    #{inspect params}
     """
 
     %__MODULE__{message: msg}
